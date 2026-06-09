@@ -1,5 +1,6 @@
 {
   "default_role_name": "CCOE_DataRead",
+  "default_role_path": "aws-reserved/sso.amazonaws.com/eu-west-1/AWSReservedSSO_CCOE_DataRead_e53295f255ae0641",
   "default_regions": ["eu-west-1", "eu-west-2", "eu-west-3"],
   "session_duration_seconds": 3600,
   "accounts": [

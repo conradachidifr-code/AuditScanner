@@ -232,7 +232,24 @@ function Set-AccountSession {
         [string]$RoleArn
     )
 
+    $sourceProfile = $env:AWS_PROFILE
+
     Clear-AccountSession
+
+    if ($sourceProfile) {
+        $identityOutput = & aws sts get-caller-identity --output json --profile $sourceProfile 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $identityText = ($identityOutput | Out-String).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($identityText)) {
+                $identity = $identityText | ConvertFrom-Json
+                if ([string]$identity.Account -eq $AccountId) {
+                    $env:AWS_PROFILE = $sourceProfile
+                    Write-AuditLog -Message "Using SSO profile for $AccountName ($AccountId)"
+                    return $true
+                }
+            }
+        }
+    }
 
     $sessionName = 'AuditScan-{0}-{1}' -f $AccountId, (Get-Date -Format 'HHmm')
     $assumeArgs = @(
@@ -241,6 +258,10 @@ function Set-AccountSession {
         '--role-session-name', $sessionName,
         '--output', 'json'
     )
+
+    if ($sourceProfile) {
+        $assumeArgs += @('--profile', $sourceProfile)
+    }
 
     $output = & aws @assumeArgs 2>&1
     if ($LASTEXITCODE -ne 0) {
@@ -280,8 +301,8 @@ function Get-AccountsFromConfig {
 
     $rawConfig = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
 
-    if (-not $rawConfig.default_role_name) {
-        throw 'Config missing required field: default_role_name'
+    if (-not $rawConfig.default_role_name -and -not $rawConfig.default_role_path) {
+        throw 'Config missing required field: default_role_name or default_role_path'
     }
     if (-not $rawConfig.default_regions) {
         throw 'Config missing required field: default_regions'
@@ -301,7 +322,12 @@ function Get-AccountsFromConfig {
 
         $roleArn = $entry.role_arn
         if (-not $roleArn) {
-            $roleArn = 'arn:aws:iam::{0}:role/{1}' -f $entry.id, $rawConfig.default_role_name
+            if ($rawConfig.default_role_path) {
+                $roleArn = 'arn:aws:iam::{0}:role/{1}' -f $entry.id, $rawConfig.default_role_path
+            }
+            else {
+                $roleArn = 'arn:aws:iam::{0}:role/{1}' -f $entry.id, $rawConfig.default_role_name
+            }
         }
 
         $regions = $entry.regions

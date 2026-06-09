@@ -11,7 +11,7 @@ PowerShell 5.1 tool that runs AWS security control checks by domain across multi
 1. **Windows PowerShell 5.1** (not PowerShell 7+)
 2. **AWS CLI v2** installed and on your `PATH`
 3. **AWS SSO** configured with access to the **PROD-SEC** account
-4. Permission to assume **`CCOE_DataRead`** in each target account listed in `accounts.json`
+4. IAM Identity Center (SSO) permission set **`CCOE_DataRead`** assigned in each target account
 
 ### Step 1 — Configure target accounts
 
@@ -23,10 +23,22 @@ Edit `accounts.json` in this folder. Each account entry needs at least:
 
 Optional per account:
 
-- `role_arn` — override the default role ARN
+- `role_arn` — full role ARN override (required if the SSO suffix differs per account)
 - `regions` — override `default_regions` (e.g. `["eu-west-1"]` only)
 
-The default role is built as `arn:aws:iam::<account-id>:role/CCOE_DataRead`.
+**SSO federated roles** use a path like:
+
+`arn:aws:iam::<account-id>:role/aws-reserved/sso.amazonaws.com/eu-west-1/AWSReservedSSO_CCOE_DataRead_<suffix>`
+
+Set `default_role_path` in `accounts.json` to the path after `role/` (same suffix is often shared across accounts). If a target account uses a different suffix, set `role_arn` on that account entry.
+
+Legacy IAM roles without SSO use `default_role_name` instead (built as `arn:aws:iam::<account-id>:role/<name>`).
+
+To list SSO role ARNs in an account after login:
+
+```powershell
+aws iam list-roles --query "Roles[?contains(RoleName, 'CCOE_DataRead')].Arn" --output table
+```
 
 ### Step 2 — Authenticate with AWS SSO
 
@@ -148,7 +160,7 @@ A summary table (Passed / Failed / Partial / Not Tested) is printed at the end o
 1. **Windows PowerShell 5.1** (pas PowerShell 7+)
 2. **AWS CLI v2** installé et accessible dans le `PATH`
 3. **AWS SSO** configuré avec accès au compte **PROD-SEC**
-4. Droit d'assumer le rôle **`CCOE_DataRead`** dans chaque compte cible listé dans `accounts.json`
+4. Permission set IAM Identity Center (SSO) **`CCOE_DataRead`** assigné dans chaque compte cible
 
 ### Étape 1 — Configurer les comptes cibles
 
@@ -160,10 +172,20 @@ Modifiez `accounts.json` dans ce dossier. Chaque entrée de compte doit contenir
 
 Options par compte :
 
-- `role_arn` — remplace l'ARN de rôle par défaut
+- `role_arn` — ARN complet (obligatoire si le suffixe SSO diffère par compte)
 - `regions` — remplace `default_regions` (ex. `["eu-west-1"]` uniquement)
 
-Le rôle par défaut est construit ainsi : `arn:aws:iam::<account-id>:role/CCOE_DataRead`.
+**Rôles fédérés SSO** — chemin typique :
+
+`arn:aws:iam::<account-id>:role/aws-reserved/sso.amazonaws.com/eu-west-1/AWSReservedSSO_CCOE_DataRead_<suffixe>`
+
+Définissez `default_role_path` dans `accounts.json` (partie après `role/`). Si un compte a un suffixe différent, définissez `role_arn` sur cette entrée.
+
+Pour lister les ARN de rôle SSO après connexion :
+
+```powershell
+aws iam list-roles --query "Roles[?contains(RoleName, 'CCOE_DataRead')].Arn" --output table
+```
 
 ### Étape 2 — S'authentifier avec AWS SSO
 
