@@ -23,38 +23,46 @@ Edit `accounts.json` in this folder. Each account entry needs at least:
 
 Optional per account:
 
-- `role_arn` — full role ARN override (required if the SSO suffix differs per account)
+- `profile` — AWS CLI profile name for this account (must match `~/.aws/config`)
+- `role_arn` — full role ARN override (only used when `auth_mode` is `assume_role`)
 - `regions` — override `default_regions` (e.g. `["eu-west-1"]` only)
 
-**SSO federated roles** use a path like:
+**Authentication mode** (`auth_mode` in `accounts.json`, default `sso_profile`):
 
-`arn:aws:iam::<account-id>:role/aws-reserved/sso.amazonaws.com/eu-west-1/AWSReservedSSO_CCOE_DataRead_<suffix>`
+| Mode | Behaviour |
+|------|-----------|
+| `sso_profile` | Uses one SSO profile per account (recommended for IAM Identity Center) |
+| `assume_role` | Calls `sts assume-role` with `role_arn` / `default_role_path` |
+| `auto` | Tries SSO profile first, then falls back to `assume_role` |
 
-Set `default_role_path` in `accounts.json` to the path after `role/` (same suffix is often shared across accounts). If a target account uses a different suffix, set `role_arn` on that account entry.
+With SSO, each account typically has its own profile in `~/.aws/config`:
 
-Legacy IAM roles without SSO use `default_role_name` instead (built as `arn:aws:iam::<account-id>:role/<name>`).
-
-To list SSO role ARNs in an account after login:
-
-```powershell
-aws iam list-roles --query "Roles[?contains(RoleName, 'CCOE_DataRead')].Arn" --output table
+```ini
+[profile PROD-SEC]
+sso_account_id = 421366298108
+sso_role_name = CCOE_DataRead
+sso_start_url = https://...
+sso_region = eu-west-1
 ```
+
+The scanner switches profile per account — it does **not** use cross-account `AssumeRole` unless you set `"auth_mode": "assume_role"`.
 
 ### Step 2 — Authenticate with AWS SSO
 
-From a shell where your SSO profile is configured, log in using the **PROD-SEC** profile:
+From a shell where your SSO profiles are configured, log in once (any profile from the same SSO portal):
 
 ```powershell
 aws sso login --profile PROD-SEC
 ```
 
-Set that profile for the scan session:
+Ensure each account in `accounts.json` has a matching `profile` name. Test each profile:
 
 ```powershell
-$env:AWS_PROFILE = 'PROD-SEC'
+aws sts get-caller-identity --profile PROD-SEC
+aws sts get-caller-identity --profile PROD-SHARED
 ```
 
-Replace `PROD-SEC` with your actual profile name if it differs.
+Replace profile names with those in your `~/.aws/config` if they differ.
 
 ### Step 3 — Open the scanner directory
 
@@ -64,7 +72,7 @@ cd path\to\AWSAuditScanner
 
 ### Step 4 — Verify connectivity (dry run)
 
-Before running a full scan, confirm role assumption works for every account:
+Before running a full scan, confirm SSO access works for every account:
 
 ```powershell
 .\Invoke-AWSScanner.ps1 -Domain IAM -DryRun
@@ -72,7 +80,7 @@ Before running a full scan, confirm role assumption works for every account:
 
 `-Domain` is required even for dry runs. The domain value is ignored during connectivity checks.
 
-Expected output: a table with `Status = OK` for reachable accounts. Accounts marked `SKIPPED` in `accounts.json` are listed with their skip reason.
+Expected output: a table with `Status = OK` and an identity ARN containing `AWSReservedSSO_CCOE_DataRead` for reachable accounts.
 
 ### Step 5 — Run a domain scan
 
@@ -146,10 +154,11 @@ A summary table (Passed / Failed / Partial / Not Tested) is printed at the end o
 
 ### Troubleshooting
 
-- **`Failed to assume role`** — confirm SSO login is still valid (`aws sso login`) and `CCOE_DataRead` trust allows your PROD-SEC identity.
-- **`PARTIAL` with "API call returned null"** — the assumed role may lack read permission for that service API.
+- **`AccessDenied` on `AssumeRole`** — normal with SSO. Set `"auth_mode": "sso_profile"` in `accounts.json` and add a `profile` per account matching `~/.aws/config`. Do not use manual `sts assume-role` for cross-account SSO access.
+- **`No valid SSO profile`** — add `profile` to the account entry or ensure `sso_account_id` in `~/.aws/config` matches the account `id`.
+- **`ExpiredToken` / SSO session expired** — run `aws sso login --profile PROD-SEC` again.
+- **`PARTIAL` with "API call returned null"** — the SSO role may lack read permission for that service API.
 - **`NOT_TESTED` with "Global control - checked in eu-west-1 only"** — some org-wide controls run only in `eu-west-1`; review results from that region.
-- **No `accounts.json`** — the scanner falls back to SSO profiles in `~/.aws/config` and assumes `CCOE_DataRead` in each discovered account.
 
 ---
 
@@ -172,36 +181,34 @@ Modifiez `accounts.json` dans ce dossier. Chaque entrée de compte doit contenir
 
 Options par compte :
 
-- `role_arn` — ARN complet (obligatoire si le suffixe SSO diffère par compte)
+- `profile` — nom du profil AWS CLI (doit correspondre à `~/.aws/config`)
+- `role_arn` — ARN complet (utilisé uniquement si `auth_mode` vaut `assume_role`)
 - `regions` — remplace `default_regions` (ex. `["eu-west-1"]` uniquement)
 
-**Rôles fédérés SSO** — chemin typique :
+**Mode d'authentification** (`auth_mode` dans `accounts.json`, défaut `sso_profile`) :
 
-`arn:aws:iam::<account-id>:role/aws-reserved/sso.amazonaws.com/eu-west-1/AWSReservedSSO_CCOE_DataRead_<suffixe>`
+| Mode | Comportement |
+|------|--------------|
+| `sso_profile` | Un profil SSO par compte (recommandé avec IAM Identity Center) |
+| `assume_role` | Appelle `sts assume-role` avec `role_arn` / `default_role_path` |
+| `auto` | Essaie d'abord le profil SSO, puis `assume_role` |
 
-Définissez `default_role_path` dans `accounts.json` (partie après `role/`). Si un compte a un suffixe différent, définissez `role_arn` sur cette entrée.
-
-Pour lister les ARN de rôle SSO après connexion :
-
-```powershell
-aws iam list-roles --query "Roles[?contains(RoleName, 'CCOE_DataRead')].Arn" --output table
-```
+Avec SSO, chaque compte a généralement son propre profil dans `~/.aws/config`. Le scanner change de profil par compte — il n'utilise **pas** `AssumeRole` inter-comptes sauf si `"auth_mode": "assume_role"`.
 
 ### Étape 2 — S'authentifier avec AWS SSO
 
-Depuis un shell où votre profil SSO est configuré, connectez-vous avec le profil **PROD-SEC** :
+Depuis un shell où vos profils SSO sont configurés, connectez-vous une fois (n'importe quel profil du même portail SSO) :
 
 ```powershell
 aws sso login --profile PROD-SEC
 ```
 
-Définissez ce profil pour la session de scan :
+Vérifiez que chaque compte dans `accounts.json` a un champ `profile` correspondant. Testez chaque profil :
 
 ```powershell
-$env:AWS_PROFILE = 'PROD-SEC'
+aws sts get-caller-identity --profile PROD-SEC
+aws sts get-caller-identity --profile PROD-SHARED
 ```
-
-Remplacez `PROD-SEC` par le nom réel de votre profil si nécessaire.
 
 ### Étape 3 — Se placer dans le répertoire du scanner
 
@@ -293,7 +300,8 @@ Un tableau récapitulatif (Passed / Failed / Partial / Not Tested) s'affiche à 
 
 ### Dépannage
 
-- **`Failed to assume role`** — vérifiez que la session SSO est encore valide (`aws sso login`) et que la relation de confiance de `CCOE_DataRead` autorise votre identité PROD-SEC.
-- **`PARTIAL` avec "API call returned null"** — le rôle assumé peut ne pas avoir les droits de lecture sur l'API concernée.
-- **`NOT_TESTED` avec "Global control - checked in eu-west-1 only"** — certains contrôles organisationnels ne s'exécutent qu'en `eu-west-1` ; consultez les résultats de cette région.
-- **Absence de `accounts.json`** — le scanner utilise les profils SSO de `~/.aws/config` et assume `CCOE_DataRead` dans chaque compte découvert.
+- **`AccessDenied` sur `AssumeRole`** — normal avec SSO. Définissez `"auth_mode": "sso_profile"` dans `accounts.json` et un champ `profile` par compte correspondant à `~/.aws/config`.
+- **`No valid SSO profile`** — ajoutez `profile` à l'entrée du compte ou vérifiez que `sso_account_id` dans `~/.aws/config` correspond à l'`id` du compte.
+- **`ExpiredToken` / session SSO expirée** — relancez `aws sso login --profile PROD-SEC`.
+- **`PARTIAL` avec "API call returned null"** — le rôle SSO peut ne pas avoir les droits de lecture sur l'API concernée.
+- **`NOT_TESTED` avec "Global control - checked in eu-west-1 only"** — certains contrôles organisationnels ne s'exécutent qu'en `eu-west-1`.

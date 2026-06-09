@@ -213,6 +213,79 @@ function New-NullApiPartialResult {
         -Notes 'API call returned null - possible permission issue'
 }
 
+function Resolve-SsoProfileForAccount {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AccountId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AccountName,
+
+        [string]$ConfiguredProfile
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($ConfiguredProfile)) {
+        return $ConfiguredProfile
+    }
+
+    try {
+        $profiles = Get-ProfilesFromConfig
+    }
+    catch {
+        return $null
+    }
+
+    foreach ($profile in $profiles) {
+        if ([string]$profile.AccountId -eq $AccountId) {
+            return [string]$profile.Name
+        }
+    }
+
+    foreach ($profile in $profiles) {
+        if ([string]$profile.Name -eq $AccountName) {
+            return [string]$profile.Name
+        }
+    }
+
+    return $null
+}
+
+function Test-SsoProfileSession {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProfileName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AccountId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AccountName
+    )
+
+    $identityOutput = & aws sts get-caller-identity --output json --profile $ProfileName 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $errorText = ($identityOutput | Out-String).Trim()
+        Write-AuditLog -Message "SSO profile '$ProfileName' failed for $AccountName ($AccountId): $errorText" -Level WARN
+        return $false
+    }
+
+    $identityText = ($identityOutput | Out-String).Trim()
+    if ([string]::IsNullOrWhiteSpace($identityText)) {
+        Write-AuditLog -Message "SSO profile '$ProfileName' returned empty identity for $AccountName ($AccountId)" -Level WARN
+        return $false
+    }
+
+    $identity = $identityText | ConvertFrom-Json
+    if ([string]$identity.Account -ne $AccountId) {
+        Write-AuditLog -Message "SSO profile '$ProfileName' maps to account $($identity.Account), expected $AccountId" -Level WARN
+        return $false
+    }
+
+    $env:AWS_PROFILE = $ProfileName
+    Write-AuditLog -Message "Using SSO profile '$ProfileName' for $AccountName ($AccountId)"
+    return $true
+}
+
 function Clear-AccountSession {
     Remove-Item Env:AWS_ACCESS_KEY_ID -ErrorAction SilentlyContinue
     Remove-Item Env:AWS_SECRET_ACCESS_KEY -ErrorAction SilentlyContinue
@@ -229,25 +302,44 @@ function Set-AccountSession {
         [string]$AccountName,
 
         [Parameter(Mandatory = $true)]
-        [string]$RoleArn
+        [string]$RoleArn,
+
+        [string]$SsoProfile,
+        [string]$AuthMode = 'sso_profile'
     )
 
     $sourceProfile = $env:AWS_PROFILE
 
     Clear-AccountSession
 
-    if ($sourceProfile) {
-        $identityOutput = & aws sts get-caller-identity --output json --profile $sourceProfile 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            $identityText = ($identityOutput | Out-String).Trim()
-            if (-not [string]::IsNullOrWhiteSpace($identityText)) {
-                $identity = $identityText | ConvertFrom-Json
-                if ([string]$identity.Account -eq $AccountId) {
-                    $env:AWS_PROFILE = $sourceProfile
-                    Write-AuditLog -Message "Using SSO profile for $AccountName ($AccountId)"
-                    return $true
+    if ($AuthMode -eq 'sso_profile' -or $AuthMode -eq 'auto') {
+        $profileToUse = Resolve-SsoProfileForAccount `
+            -AccountId $AccountId `
+            -AccountName $AccountName `
+            -ConfiguredProfile $SsoProfile
+
+        if (-not $profileToUse -and $sourceProfile) {
+            $identityOutput = & aws sts get-caller-identity --output json --profile $sourceProfile 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $identityText = ($identityOutput | Out-String).Trim()
+                if (-not [string]::IsNullOrWhiteSpace($identityText)) {
+                    $identity = $identityText | ConvertFrom-Json
+                    if ([string]$identity.Account -eq $AccountId) {
+                        $profileToUse = $sourceProfile
+                    }
                 }
             }
+        }
+
+        if ($profileToUse) {
+            if (Test-SsoProfileSession -ProfileName $profileToUse -AccountId $AccountId -AccountName $AccountName) {
+                return $true
+            }
+        }
+
+        if ($AuthMode -eq 'sso_profile') {
+            Write-AuditLog -Message "No valid SSO profile for $AccountName ($AccountId). Set 'profile' in accounts.json or add sso_account_id in ~/.aws/config." -Level WARN
+            return $false
         }
     }
 
@@ -345,19 +437,36 @@ function Get-AccountsFromConfig {
             $skipReason = [string]$entry.skip_reason
         }
 
+        $ssoProfile = ''
+        if ($entry.PSObject.Properties.Name -contains 'profile') {
+            $ssoProfile = [string]$entry.profile
+        }
+        elseif ($entry.PSObject.Properties.Name -contains 'sso_profile') {
+            $ssoProfile = [string]$entry.sso_profile
+        }
+
         $accounts += [PSCustomObject]@{
             id          = [string]$entry.id
             name        = [string]$entry.name
             role_arn    = [string]$roleArn
+            sso_profile = [string]$ssoProfile
             regions     = @($regions)
             skip        = $skip
             skip_reason = $skipReason
         }
     }
 
+    $authMode = 'sso_profile'
+    if ($rawConfig.PSObject.Properties.Name -contains 'auth_mode') {
+        if (-not [string]::IsNullOrWhiteSpace([string]$rawConfig.auth_mode)) {
+            $authMode = [string]$rawConfig.auth_mode
+        }
+    }
+
     return ,@{
         default_role_name = [string]$rawConfig.default_role_name
         default_regions   = @($rawConfig.default_regions)
+        auth_mode         = $authMode
         accounts          = $accounts
     }
 }
@@ -409,7 +518,9 @@ function Get-ProfilesFromConfig {
 function Test-AccountConnectivity {
     param(
         [Parameter(Mandatory = $true)]
-        $Account
+        $Account,
+
+        [string]$AuthMode = 'sso_profile'
     )
 
     $result = [PSCustomObject]@{
@@ -421,7 +532,12 @@ function Test-AccountConnectivity {
     }
 
     try {
-        $sessionOk = Set-AccountSession -AccountId $Account.id -AccountName $Account.name -RoleArn $Account.role_arn
+        $sessionOk = Set-AccountSession `
+            -AccountId $Account.id `
+            -AccountName $Account.name `
+            -RoleArn $Account.role_arn `
+            -SsoProfile $Account.sso_profile `
+            -AuthMode $AuthMode
         if (-not $sessionOk) {
             $result.Error = 'Failed to assume role'
             return $result
@@ -506,16 +622,19 @@ $Script:SessionLogFile = Join-Path $errorsPath ("AuditSession_{0}.log" -f $times
 $configSource = 'config'
 $defaultRegions = @()
 $accounts = @()
+$authMode = 'sso_profile'
 
 try {
     $config = Get-AccountsFromConfig -Path $ConfigFile
     $defaultRegions = @($config.default_regions)
     $accounts = @($config.accounts)
+    $authMode = [string]$config.auth_mode
 }
 catch {
     Write-AuditLog -Message $_.Exception.Message -Level WARN
     Write-AuditLog -Message 'Falling back to AWS profile discovery from ~/.aws/config' -Level WARN
     $configSource = 'profiles'
+    $authMode = 'sso_profile'
 
     $profiles = Get-ProfilesFromConfig
     $fallbackRoleName = 'CCOE_DataRead'
@@ -527,6 +646,7 @@ catch {
             id          = [string]$profile.AccountId
             name        = [string]$profile.Name
             role_arn    = $roleArn
+            sso_profile = [string]$profile.Name
             regions     = @($defaultRegions)
             skip        = $false
             skip_reason = ''
@@ -575,7 +695,7 @@ if ($DryRun) {
             continue
         }
 
-        $connectivity = Test-AccountConnectivity -Account $account
+        $connectivity = Test-AccountConnectivity -Account $account -AuthMode $authMode
         $dryRunResults += [PSCustomObject]@{
             Name      = $connectivity.AccountName
             AccountId = $connectivity.AccountId
@@ -629,7 +749,12 @@ foreach ($account in $accounts) {
 
     Write-Host ('--- Account: {0} ({1}) ---' -f $account.name, $account.id)
 
-    $sessionOk = Set-AccountSession -AccountId $account.id -AccountName $account.name -RoleArn $account.role_arn
+    $sessionOk = Set-AccountSession `
+        -AccountId $account.id `
+        -AccountName $account.name `
+        -RoleArn $account.role_arn `
+        -SsoProfile $account.sso_profile `
+        -AuthMode $authMode
     if (-not $sessionOk) {
         Write-AuditLog -Message "Could not establish session for $($account.name) ($($account.id))" -Level ERROR
 

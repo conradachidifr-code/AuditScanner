@@ -1,4 +1,5 @@
 {
+  "auth_mode": "sso_profile",
   "default_role_name": "CCOE_DataRead",
   "default_role_path": "aws-reserved/sso.amazonaws.com/eu-west-1/AWSReservedSSO_CCOE_DataRead_e53295f255ae0641",
   "default_regions": ["eu-west-1", "eu-west-2", "eu-west-3"],
@@ -7,6 +8,7 @@
     {
       "id": "421366298108",
       "name": "PROD-SEC",
+      "profile": "PROD-SEC",
       "role_arn": null,
       "regions": null,
       "skip": false,
@@ -15,6 +17,7 @@
     {
       "id": "306241591911",
       "name": "PROD-SHARED",
+      "profile": "PROD-SHARED",
       "role_arn": null,
       "regions": null,
       "skip": false,
@@ -23,6 +26,7 @@
     {
       "id": "316415870397",
       "name": "PROD-NET",
+      "profile": "PROD-NET",
       "role_arn": null,
       "regions": ["eu-west-1"],
       "skip": false,
@@ -31,6 +35,7 @@
     {
       "id": "590183673732",
       "name": "PROD-MON",
+      "profile": "PROD-MON",
       "role_arn": null,
       "regions": null,
       "skip": false,
@@ -39,6 +44,7 @@
     {
       "id": "000000000000",
       "name": "MGMT-ACCOUNT",
+      "profile": null,
       "role_arn": null,
       "regions": null,
       "skip": true,
