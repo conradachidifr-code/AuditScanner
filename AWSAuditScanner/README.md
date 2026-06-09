@@ -11,7 +11,7 @@ PowerShell 5.1 tool that runs AWS security control checks by domain across multi
 1. **Windows PowerShell 5.1** (not PowerShell 7+)
 2. **AWS CLI v2** installed and on your `PATH`
 3. **AWS SSO** configured with access to the **PROD-SEC** account
-4. IAM Identity Center (SSO) permission set **`CCOE_DataRead`** assigned in each target account
+4. IAM Identity Center (SSO) permission set **`CCOE_SecurityAudit`** assigned in each target account
 
 ### Step 1 — Configure target accounts
 
@@ -40,7 +40,7 @@ With SSO, each account typically has its own profile in `~/.aws/config`:
 ```ini
 [profile PROD-SEC]
 sso_account_id = 421366298108
-sso_role_name = CCOE_DataRead
+sso_role_name = CCOE_SecurityAudit
 sso_start_url = https://...
 sso_region = eu-west-1
 ```
@@ -80,7 +80,7 @@ Before running a full scan, confirm SSO access works for every account:
 
 `-Domain` is required even for dry runs. The domain value is ignored during connectivity checks.
 
-Expected output: a table with `Status = OK` and an identity ARN containing `AWSReservedSSO_CCOE_DataRead` for reachable accounts.
+Expected output: a table with `Status = OK` and an identity ARN containing `AWSReservedSSO_CCOE_SecurityAudit` for reachable accounts.
 
 ### Step 5 — Run a domain scan
 
@@ -106,7 +106,7 @@ Pick one domain and run the scan:
 | `INC` | Incident response |
 | `WRK` | Workloads (Lambda, ECS, EKS, RDS, API Gateway) |
 
-The scanner loops through each non-skipped account, assumes `CCOE_DataRead`, runs every control in that domain for each configured region, and writes one JSON file per account.
+The scanner loops through each non-skipped account, assumes `CCOE_SecurityAudit`, runs every control in that domain for each configured region, and writes one JSON file per account.
 
 ### Step 6 — Review results
 
@@ -169,7 +169,7 @@ A summary table (Passed / Failed / Partial / Not Tested) is printed at the end o
 1. **Windows PowerShell 5.1** (pas PowerShell 7+)
 2. **AWS CLI v2** installé et accessible dans le `PATH`
 3. **AWS SSO** configuré avec accès au compte **PROD-SEC**
-4. Permission set IAM Identity Center (SSO) **`CCOE_DataRead`** assigné dans chaque compte cible
+4. Permission set IAM Identity Center (SSO) **`CCOE_SecurityAudit`** assigné dans chaque compte cible
 
 ### Étape 1 — Configurer les comptes cibles
 
@@ -252,7 +252,7 @@ Choisissez un domaine et exécutez le scan :
 | `INC` | Réponse aux incidents |
 | `WRK` | Charges de travail (Lambda, ECS, EKS, RDS, API Gateway) |
 
-Le scanner parcourt chaque compte non exclu, assume `CCOE_DataRead`, exécute tous les contrôles du domaine pour chaque région configurée, et écrit un fichier JSON par compte.
+Le scanner parcourt chaque compte non exclu, assume `CCOE_SecurityAudit`, exécute tous les contrôles du domaine pour chaque région configurée, et écrit un fichier JSON par compte.
 
 ### Étape 6 — Consulter les résultats
 
