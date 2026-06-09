@@ -1,0 +1,7 @@
+# Scan output
+AWSAuditScanner/output/
+
+# AWS / local secrets
+.env
+*.pem
+credentials

@@ -1,0 +1,47 @@
+{
+  "default_role_name": "CCOE_DataRead",
+  "default_regions": ["eu-west-1", "eu-west-2", "eu-west-3"],
+  "session_duration_seconds": 3600,
+  "accounts": [
+    {
+      "id": "421366298108",
+      "name": "PROD-SEC",
+      "role_arn": null,
+      "regions": null,
+      "skip": false,
+      "skip_reason": ""
+    },
+    {
+      "id": "306241591911",
+      "name": "PROD-SHARED",
+      "role_arn": null,
+      "regions": null,
+      "skip": false,
+      "skip_reason": ""
+    },
+    {
+      "id": "316415870397",
+      "name": "PROD-NET",
+      "role_arn": null,
+      "regions": ["eu-west-1"],
+      "skip": false,
+      "skip_reason": ""
+    },
+    {
+      "id": "590183673732",
+      "name": "PROD-MON",
+      "role_arn": null,
+      "regions": null,
+      "skip": false,
+      "skip_reason": ""
+    },
+    {
+      "id": "000000000000",
+      "name": "MGMT-ACCOUNT",
+      "role_arn": null,
+      "regions": null,
+      "skip": true,
+      "skip_reason": "Management account controlled by SCC - no audit role available"
+    }
+  ]
+}
