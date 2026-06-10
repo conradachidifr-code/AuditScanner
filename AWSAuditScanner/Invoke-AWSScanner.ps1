@@ -16,6 +16,10 @@ $ErrorActionPreference = 'Stop'
 
 $Script:ControlSeverity = @{}
 $Script:SessionLogFile = $null
+$Script:DiagnosticFile = $null
+$Script:DiagnosticDomain = ''
+$Script:CheckContext = @{}
+$Script:CheckCliLog = @()
 $Script:SessionStartTime = Get-Date
 
 $validDomains = @('LOG', 'IAM', 'DET', 'DAT', 'GOV', 'ORG', 'NET', 'CIC', 'BCK', 'INC', 'WRK')
@@ -57,6 +61,187 @@ function Write-AuditLog {
     }
 }
 
+function Set-AuditCheckContext {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AccountId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AccountName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Region,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ControlId
+    )
+
+    $Script:CheckContext = @{
+        AccountId   = $AccountId
+        AccountName = $AccountName
+        Region      = $Region
+        ControlId   = $ControlId
+    }
+    $Script:CheckCliLog = @()
+}
+
+function Get-AwsCliCommandString {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Region
+    )
+
+    $parts = @('aws') + @($Arguments) + @('--output', 'json', '--region', $Region)
+
+    if ($env:AWS_ACCESS_KEY_ID) {
+        $parts += '[env credentials]'
+    }
+    elseif ($env:AWS_PROFILE) {
+        $parts += @('--profile', $env:AWS_PROFILE)
+    }
+
+    return ($parts -join ' ')
+}
+
+function Add-AuditCliLogEntry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Command,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$Success,
+
+        $ExitCode = $null,
+        [string]$Output = ''
+    )
+
+    $Script:CheckCliLog += [PSCustomObject]@{
+        Command  = $Command
+        Success  = $Success
+        ExitCode = $ExitCode
+        Output   = $Output
+    }
+}
+
+function Write-AuditDiagnostic {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('powershell_exception', 'cli_failure', 'cli_json_error', 'cli_no_credentials', 'cli_empty_response')]
+        [string]$Type,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Message,
+
+        [string]$ExceptionType = '',
+        [string]$StackTrace = '',
+        [object[]]$FailedCommands = @()
+    )
+
+    if (-not $Script:DiagnosticFile) {
+        return
+    }
+
+    $ctx = $Script:CheckContext
+    $accountLabel = 'unknown'
+    if ($ctx -and $ctx.AccountName -and $ctx.AccountId) {
+        $accountLabel = '{0} ({1})' -f $ctx.AccountName, $ctx.AccountId
+    }
+
+    $controlId = ''
+    $region = ''
+    if ($ctx) {
+        if ($ctx.ControlId) { $controlId = [string]$ctx.ControlId }
+        if ($ctx.Region) { $region = [string]$ctx.Region }
+    }
+
+    $lines = @()
+    $lines += '================================================================================'
+    $lines += ('[{0}] {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Type.ToUpper())
+    $lines += ('Domain      : {0}' -f $Script:DiagnosticDomain)
+    $lines += ('Account     : {0}' -f $accountLabel)
+    $lines += ('Region      : {0}' -f $region)
+    $lines += ('Control     : {0}' -f $controlId)
+    $lines += ('Message     : {0}' -f $Message)
+
+    if (-not [string]::IsNullOrWhiteSpace($ExceptionType)) {
+        $lines += ('ExceptionType: {0}' -f $ExceptionType)
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($StackTrace)) {
+        $lines += 'Stack trace :'
+        foreach ($stackLine in ($StackTrace -split "`r?`n")) {
+            if (-not [string]::IsNullOrWhiteSpace($stackLine)) {
+                $lines += ('  {0}' -f $stackLine)
+            }
+        }
+    }
+
+    if ($FailedCommands -and $FailedCommands.Count -gt 0) {
+        $lines += 'Failed command(s):'
+        foreach ($cmd in $FailedCommands) {
+            $statusLabel = 'FAIL'
+            if ($cmd.Success -eq $true) {
+                $statusLabel = 'OK'
+            }
+
+            $exitLabel = ''
+            if ($null -ne $cmd.ExitCode) {
+                $exitLabel = ' exit={0}' -f $cmd.ExitCode
+            }
+
+            $commandText = [string]$cmd.Command
+            if ($cmd.PSObject.Properties.Name -contains 'command') {
+                $commandText = [string]$cmd.command
+            }
+
+            $lines += ('  [{0}{1}] {2}' -f $statusLabel, $exitLabel, $commandText)
+
+            $outputText = ''
+            if ($cmd.PSObject.Properties.Name -contains 'Output') {
+                $outputText = [string]$cmd.Output
+            }
+            elseif ($cmd.PSObject.Properties.Name -contains 'output') {
+                $outputText = [string]$cmd.output
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($outputText)) {
+                foreach ($outputLine in ($outputText -split "`r?`n")) {
+                    $lines += ('    {0}' -f $outputLine)
+                }
+            }
+        }
+    }
+
+    if ($Script:CheckCliLog -and $Script:CheckCliLog.Count -gt 0) {
+        $lines += 'All CLI commands during this check:'
+        foreach ($cmd in $Script:CheckCliLog) {
+            $statusLabel = 'FAIL'
+            if ($cmd.Success -eq $true) {
+                $statusLabel = 'OK'
+            }
+
+            $exitLabel = ''
+            if ($null -ne $cmd.ExitCode) {
+                $exitLabel = ' exit={0}' -f $cmd.ExitCode
+            }
+
+            $lines += ('  [{0}{1}] {2}' -f $statusLabel, $exitLabel, $cmd.Command)
+
+            if (-not [string]::IsNullOrWhiteSpace([string]$cmd.Output)) {
+                foreach ($outputLine in ([string]$cmd.Output -split "`r?`n")) {
+                    $lines += ('    {0}' -f $outputLine)
+                }
+            }
+        }
+    }
+
+    $lines += ''
+    Add-Content -Path $Script:DiagnosticFile -Value ($lines -join "`r`n") -Encoding UTF8
+}
+
 function Invoke-AWSCLI {
     param(
         [Parameter(Mandatory = $true)]
@@ -66,29 +251,80 @@ function Invoke-AWSCLI {
         [string]$Region
     )
 
+    $commandString = Get-AwsCliCommandString -Arguments $Arguments -Region $Region
     $cliArgs = @($Arguments) + @('--output', 'json', '--region', $Region)
+
+    if (-not $env:AWS_ACCESS_KEY_ID) {
+        $profileName = $env:AWS_PROFILE
+        if (-not $profileName) {
+            $noCredOutput = 'No AWS credentials or profile in environment'
+            Add-AuditCliLogEntry -Command $commandString -Success $false -Output $noCredOutput
+            Write-AuditDiagnostic `
+                -Type 'cli_no_credentials' `
+                -Message $noCredOutput `
+                -FailedCommands @(@{
+                    Command  = $commandString
+                    Success  = $false
+                    ExitCode = $null
+                    Output   = $noCredOutput
+                })
+            return $null
+        }
+    }
 
     if ($env:AWS_ACCESS_KEY_ID) {
         $output = & aws @cliArgs 2>&1
     }
     else {
-        $profileName = $env:AWS_PROFILE
-        if (-not $profileName) {
-            return $null
-        }
-        $output = & aws @cliArgs '--profile' $profileName 2>&1
+        $output = & aws @cliArgs '--profile' $env:AWS_PROFILE 2>&1
     }
 
-    if ($LASTEXITCODE -ne 0) {
-        return $null
-    }
-
+    $exitCode = $LASTEXITCODE
     $outputText = ($output | Out-String).Trim()
-    if ([string]::IsNullOrWhiteSpace($outputText)) {
+    if ($outputText.Length -gt 4000) {
+        $outputText = $outputText.Substring(0, 4000) + '... [truncated]'
+    }
+
+    $logEntry = @{
+        Command  = $commandString
+        Success  = $false
+        ExitCode = $exitCode
+        Output   = $outputText
+    }
+
+    if ($exitCode -ne 0) {
+        Add-AuditCliLogEntry -Command $commandString -Success $false -ExitCode $exitCode -Output $outputText
+        Write-AuditDiagnostic `
+            -Type 'cli_failure' `
+            -Message ('AWS CLI exited with code {0}' -f $exitCode) `
+            -FailedCommands @($logEntry)
         return $null
     }
 
-    return ($outputText | ConvertFrom-Json)
+    if ([string]::IsNullOrWhiteSpace($outputText)) {
+        Add-AuditCliLogEntry -Command $commandString -Success $false -ExitCode $exitCode -Output 'Empty response body'
+        Write-AuditDiagnostic `
+            -Type 'cli_empty_response' `
+            -Message 'AWS CLI returned an empty response' `
+            -FailedCommands @($logEntry)
+        return $null
+    }
+
+    try {
+        $parsed = $outputText | ConvertFrom-Json
+        Add-AuditCliLogEntry -Command $commandString -Success $true -ExitCode $exitCode -Output ''
+        return $parsed
+    }
+    catch {
+        $jsonError = $_.Exception.Message
+        $logEntry.Output = $jsonError
+        Add-AuditCliLogEntry -Command $commandString -Success $false -ExitCode $exitCode -Output $jsonError
+        Write-AuditDiagnostic `
+            -Type 'cli_json_error' `
+            -Message $jsonError `
+            -FailedCommands @($logEntry)
+        return $null
+    }
 }
 
 function New-AuditResult {
@@ -601,6 +837,226 @@ function Get-SummaryRow {
     }
 }
 
+function Get-AuditCliLogSnapshot {
+    $snapshot = @()
+
+    foreach ($entry in $Script:CheckCliLog) {
+        $snapshot += [PSCustomObject]@{
+            command   = [string]$entry.Command
+            success   = [bool]$entry.Success
+            exit_code = $entry.ExitCode
+            output    = [string]$entry.Output
+        }
+    }
+
+    return $snapshot
+}
+
+function New-AuditEvidenceRecord {
+    param(
+        [Parameter(Mandatory = $true)]
+        $Result
+    )
+
+    return [PSCustomObject]@{
+        control_id        = [string]$Result.ControlId
+        region            = [string]$Result.Region
+        status            = [string]$Result.Status
+        severity          = [string]$Result.Severity
+        notes             = [string]$Result.Notes
+        timestamp         = [string]$Result.Timestamp
+        evidence          = $Result.Evidence
+        commands_executed = @(Get-AuditCliLogSnapshot)
+    }
+}
+
+function Initialize-AccountOutputPaths {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AccountName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AccountId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Domain,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Timestamp
+    )
+
+    $accountFolder = Join-Path $OutputPath ('{0}_{1}' -f $AccountName, $AccountId)
+    $evidencePath = Join-Path $accountFolder 'evidence'
+    $accountErrorsPath = Join-Path $accountFolder 'errors'
+
+    foreach ($path in @($accountFolder, $evidencePath, $accountErrorsPath)) {
+        if (-not (Test-Path -LiteralPath $path)) {
+            New-Item -ItemType Directory -Path $path -Force | Out-Null
+        }
+    }
+
+    return [PSCustomObject]@{
+        AccountFolder  = $accountFolder
+        EvidencePath   = $evidencePath
+        ErrorsPath     = $accountErrorsPath
+        ResultsFile    = (Join-Path $accountFolder ('{0}_{1}.json' -f $Domain, $Timestamp))
+        DiagnosticFile = (Join-Path $accountErrorsPath ('AuditDiagnostics_{0}_{1}.log' -f $Domain, $Timestamp))
+        EvidenceFile   = (Join-Path $evidencePath ('{0}_{1}_evidence.json' -f $Domain, $Timestamp))
+    }
+}
+
+function Start-AccountDiagnosticLog {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DiagnosticFile,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Domain,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AccountName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AccountId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Auditor
+    )
+
+    $header = @(
+        'AWS Audit Scanner - account diagnostic log'
+        ('Domain    : {0}' -f $Domain)
+        ('Account   : {0} ({1})' -f $AccountName, $AccountId)
+        ('Started   : {0}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
+        ('Auditor   : {0}' -f $Auditor)
+        'PowerShell exceptions and failed AWS CLI commands are recorded below.'
+        ''
+    )
+    Set-Content -Path $DiagnosticFile -Value ($header -join "`r`n") -Encoding UTF8
+    $Script:DiagnosticFile = $DiagnosticFile
+}
+
+function Write-AccountResultsFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResultsFile,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AccountId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AccountName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Domain,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Timestamp,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Auditor,
+
+        $Account,
+
+        [Parameter(Mandatory = $true)]
+        [array]$Results
+    )
+
+    $outputObject = @{
+        metadata = @{
+            account_id   = $AccountId
+            account_name = $AccountName
+            domain       = $Domain
+            auditor      = $Auditor
+            timestamp    = $Timestamp
+            role_arn     = [string]$Account.role_arn
+            regions      = @($Account.regions)
+        }
+        results = @($Results)
+    }
+
+    $outputObject | ConvertTo-Json -Depth 10 | Out-File -FilePath $ResultsFile -Encoding UTF8
+    Write-AuditLog -Message "Written: $ResultsFile"
+
+    return $ResultsFile
+}
+
+function Write-AccountEvidenceFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$EvidenceFile,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AccountId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AccountName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Domain,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Timestamp,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Auditor,
+
+        $Account,
+
+        [Parameter(Mandatory = $true)]
+        [array]$EvidenceRecords
+    )
+
+    $ssoProfile = ''
+    if ($Account.PSObject.Properties.Name -contains 'sso_profile') {
+        $ssoProfile = [string]$Account.sso_profile
+    }
+
+    $capturedEvidence = @()
+    foreach ($record in $EvidenceRecords) {
+        $hasEvidence = $false
+        if ($null -ne $record.evidence) {
+            $hasEvidence = $true
+        }
+
+        $hasCommands = $false
+        if ($record.commands_executed -and @($record.commands_executed).Count -gt 0) {
+            $hasCommands = $true
+        }
+
+        if ($hasEvidence -or $hasCommands) {
+            $capturedEvidence += $record
+        }
+    }
+
+    if ($capturedEvidence.Count -eq 0) {
+        Write-AuditLog -Message "No captured evidence for $AccountName - skipping evidence file"
+        return $null
+    }
+
+    $evidenceObject = @{
+        metadata = @{
+            account_id   = $AccountId
+            account_name = $AccountName
+            domain       = $Domain
+            auditor      = $Auditor
+            timestamp    = $Timestamp
+            role_arn     = [string]$Account.role_arn
+            sso_profile  = $ssoProfile
+            regions      = @($Account.regions)
+        }
+        controls = @($capturedEvidence)
+    }
+
+    $evidenceObject | ConvertTo-Json -Depth 15 | Out-File -FilePath $EvidenceFile -Encoding UTF8
+    Write-AuditLog -Message "Written: $EvidenceFile"
+
+    return $EvidenceFile
+}
+
 # --- Main execution ---
 
 if ($validDomains -notcontains $Domain) {
@@ -608,16 +1064,19 @@ if ($validDomains -notcontains $Domain) {
     exit 1
 }
 
-$errorsPath = Join-Path $OutputPath 'errors'
+$logPath = Join-Path $OutputPath 'log'
 if (-not (Test-Path -LiteralPath $OutputPath)) {
     New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
 }
-if (-not (Test-Path -LiteralPath $errorsPath)) {
-    New-Item -ItemType Directory -Path $errorsPath -Force | Out-Null
+if (-not (Test-Path -LiteralPath $logPath)) {
+    New-Item -ItemType Directory -Path $logPath -Force | Out-Null
 }
 
 $timestamp = Get-Date -Format 'yyyyMMdd-HHmm'
-$Script:SessionLogFile = Join-Path $errorsPath ("AuditSession_{0}.log" -f $timestamp)
+$Script:SessionLogFile = Join-Path $logPath ("AuditSession_{0}.log" -f $timestamp)
+$Script:DiagnosticFile = $null
+$Script:DiagnosticDomain = $Domain
+$writtenAccountFolders = @()
 
 $configSource = 'config'
 $defaultRegions = @()
@@ -749,6 +1208,22 @@ foreach ($account in $accounts) {
 
     Write-Host ('--- Account: {0} ({1}) ---' -f $account.name, $account.id)
 
+    $accountPaths = Initialize-AccountOutputPaths `
+        -OutputPath $OutputPath `
+        -AccountName $account.name `
+        -AccountId $account.id `
+        -Domain $Domain `
+        -Timestamp $timestamp
+
+    Start-AccountDiagnosticLog `
+        -DiagnosticFile $accountPaths.DiagnosticFile `
+        -Domain $Domain `
+        -AccountName $account.name `
+        -AccountId $account.id `
+        -Auditor $Auditor
+
+    $accountEvidenceRecords = @()
+
     $sessionOk = Set-AccountSession `
         -AccountId $account.id `
         -AccountName $account.name `
@@ -772,9 +1247,35 @@ foreach ($account in $accounts) {
             }
         }
 
+        foreach ($failedResult in $accountResults) {
+            $accountEvidenceRecords += New-AuditEvidenceRecord -Result $failedResult
+        }
+
+        Write-AccountResultsFile `
+            -ResultsFile $accountPaths.ResultsFile `
+            -AccountId $account.id `
+            -AccountName $account.name `
+            -Domain $Domain `
+            -Timestamp $timestamp `
+            -Auditor $Auditor `
+            -Account $account `
+            -Results $accountResults | Out-Null
+
+        Write-AccountEvidenceFile `
+            -EvidenceFile $accountPaths.EvidenceFile `
+            -AccountId $account.id `
+            -AccountName $account.name `
+            -Domain $Domain `
+            -Timestamp $timestamp `
+            -Auditor $Auditor `
+            -Account $account `
+            -EvidenceRecords $accountEvidenceRecords | Out-Null
+
+        $writtenAccountFolders += $accountPaths.AccountFolder
         $allAccountResults[$account.name] = $accountResults
         $summaryRows += Get-SummaryRow -AccountName $account.name -Results $accountResults
         Clear-AccountSession
+        $Script:DiagnosticFile = $null
         continue
     }
 
@@ -787,7 +1288,13 @@ foreach ($account in $accounts) {
             $checkBlock = $domainChecks[$controlId]
 
             if ($SkipControls -contains $controlId) {
-                $accountResults += New-AuditResult `
+                Set-AuditCheckContext `
+                    -AccountId $account.id `
+                    -AccountName $account.name `
+                    -Region $region `
+                    -ControlId $controlId
+
+                $skippedResult = New-AuditResult `
                     -AccountId $account.id `
                     -AccountName $account.name `
                     -Region $region `
@@ -795,14 +1302,37 @@ foreach ($account in $accounts) {
                     -Status 'NOT_TESTED' `
                     -Evidence $null `
                     -Notes 'Skipped by parameter'
+
+                $accountResults += $skippedResult
+                $accountEvidenceRecords += New-AuditEvidenceRecord -Result $skippedResult
                 continue
             }
+
+            Set-AuditCheckContext `
+                -AccountId $account.id `
+                -AccountName $account.name `
+                -Region $region `
+                -ControlId $controlId
 
             $result = $null
             try {
                 $result = & $checkBlock -AccountId $account.id -AccountName $account.name -Region $region
             }
             catch {
+                $exceptionType = $_.Exception.GetType().FullName
+                $stackTrace = $_.ScriptStackTrace
+                if ([string]::IsNullOrWhiteSpace($stackTrace)) {
+                    $stackTrace = $_.Exception.StackTrace
+                }
+
+                Write-AuditDiagnostic `
+                    -Type 'powershell_exception' `
+                    -Message $_.Exception.Message `
+                    -ExceptionType $exceptionType `
+                    -StackTrace $stackTrace
+
+                Write-AuditLog -Message "Control $controlId exception on $($account.name)/${region}: $($_.Exception.Message)" -Level ERROR
+
                 $result = New-AuditResult `
                     -AccountId $account.id `
                     -AccountName $account.name `
@@ -825,6 +1355,7 @@ foreach ($account in $accounts) {
             }
 
             $accountResults += $result
+            $accountEvidenceRecords += New-AuditEvidenceRecord -Result $result
 
             if ($PSCmdlet.MyInvocation.BoundParameters.ContainsKey('Verbose')) {
                 Write-Host ('    {0}: {1}' -f $controlId, $result.Status)
@@ -833,24 +1364,29 @@ foreach ($account in $accounts) {
     }
 
     Clear-AccountSession
+    $Script:DiagnosticFile = $null
 
-    $outputFile = Join-Path $OutputPath ('{0}_{1}_{2}_{3}.json' -f $account.name, $account.id, $Domain, $timestamp)
-    $outputObject = @{
-        metadata = @{
-            account_id   = $account.id
-            account_name = $account.name
-            domain       = $Domain
-            auditor      = $Auditor
-            timestamp    = $timestamp
-            role_arn     = $account.role_arn
-            regions      = @($account.regions)
-        }
-        results = @($accountResults)
-    }
+    Write-AccountResultsFile `
+        -ResultsFile $accountPaths.ResultsFile `
+        -AccountId $account.id `
+        -AccountName $account.name `
+        -Domain $Domain `
+        -Timestamp $timestamp `
+        -Auditor $Auditor `
+        -Account $account `
+        -Results $accountResults | Out-Null
 
-    $outputObject | ConvertTo-Json -Depth 10 | Out-File -FilePath $outputFile -Encoding UTF8
-    Write-AuditLog -Message "Written: $outputFile"
+    Write-AccountEvidenceFile `
+        -EvidenceFile $accountPaths.EvidenceFile `
+        -AccountId $account.id `
+        -AccountName $account.name `
+        -Domain $Domain `
+        -Timestamp $timestamp `
+        -Auditor $Auditor `
+        -Account $account `
+        -EvidenceRecords $accountEvidenceRecords | Out-Null
 
+    $writtenAccountFolders += $accountPaths.AccountFolder
     $allAccountResults[$account.name] = $accountResults
     $summaryRows += Get-SummaryRow -AccountName $account.name -Results $accountResults
 }
@@ -871,3 +1407,17 @@ $summaryDisplay | Format-Table -AutoSize | Out-String | Write-Host
 $elapsed = (Get-Date) - $Script:SessionStartTime
 Write-Host ('Total elapsed time: {0:g}' -f $elapsed)
 Write-AuditLog -Message ("Session completed in {0:g}" -f $elapsed)
+
+Write-Host ''
+Write-Host ('Output folder : {0}' -f $OutputPath)
+Write-Host ('Session log   : {0}' -f $Script:SessionLogFile)
+
+if ($writtenAccountFolders.Count -gt 0) {
+    Write-Host 'Account output:'
+    foreach ($accountFolder in $writtenAccountFolders) {
+        Write-Host ('  {0}' -f $accountFolder)
+        Write-Host ('    results  : {0}' -f (Join-Path $accountFolder ('{0}_{1}.json' -f $Domain, $timestamp)))
+        Write-Host ('    evidence : {0}' -f (Join-Path $accountFolder ('evidence\{0}_{1}_evidence.json' -f $Domain, $timestamp)))
+        Write-Host ('    errors   : {0}' -f (Join-Path $accountFolder ('errors\AuditDiagnostics_{0}_{1}.log' -f $Domain, $timestamp)))
+    }
+}

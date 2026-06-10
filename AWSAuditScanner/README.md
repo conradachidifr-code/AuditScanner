@@ -2,6 +2,46 @@
 
 PowerShell 5.1 tool that runs AWS security control checks by domain across multiple accounts. Each check calls the AWS CLI and writes structured JSON results.
 
+## Project structure
+
+Repository layout (committed to git):
+
+```
+AWSAuditScanner/
+├── Invoke-AWSScanner.ps1    # Main scanner script
+├── accounts.json            # Target accounts and SSO profiles
+├── README.md
+├── .gitignore               # Ignores output/
+└── domains/
+    ├── LOG.ps1
+    ├── IAM.ps1
+    ├── DET.ps1
+    ├── DAT.ps1
+    ├── GOV.ps1
+    ├── ORG.ps1
+    ├── NET.ps1
+    ├── CIC.ps1
+    ├── BCK.ps1
+    ├── INC.ps1
+    └── WRK.ps1
+```
+
+Scan output layout (created at runtime, not committed):
+
+```
+output/
+├── log/
+│   └── AuditSession_{timestamp}.log
+├── {AccountName}_{AccountId}/
+│   ├── {Domain}_{timestamp}.json          # Scan results
+│   ├── evidence/
+│   │   └── {Domain}_{timestamp}_evidence.json
+│   └── errors/
+│       └── AuditDiagnostics_{Domain}_{timestamp}.log
+└── {AccountName}_{AccountId}/
+    └── ...
+```
+
 ---
 
 ## English
@@ -110,13 +150,16 @@ The scanner loops through each non-skipped account, assumes `CCOE_SecurityAudit`
 
 ### Step 6 — Review results
 
-**Scan output** — one file per account per run:
+Each scanned account gets its own folder under `output/`:
 
 ```
-output/{AccountName}_{AccountId}_{Domain}_{timestamp}.json
+output/{AccountName}_{AccountId}/
+├── {Domain}_{timestamp}.json
+├── evidence/{Domain}_{timestamp}_evidence.json
+└── errors/AuditDiagnostics_{Domain}_{timestamp}.log
 ```
 
-Each file contains `metadata` (account, domain, auditor, regions) and a `results` array. Each result includes:
+**Results file** (`{Domain}_{timestamp}.json`) — contains `metadata` and a `results` array:
 
 | Field | Meaning |
 |-------|---------|
@@ -125,7 +168,11 @@ Each file contains `metadata` (account, domain, auditor, regions) and a `results
 | `Evidence` | Structured data collected by the check |
 | `Notes` | Human-readable context |
 
-**Session log** — written to `output/errors/AuditSession_{timestamp}.log`.
+**Evidence file** — controls where evidence or CLI commands were captured, with a `commands_executed` array per control.
+
+**Account diagnostics** — PowerShell exceptions and failed `aws` commands for that account only.
+
+**Session log** — `output/log/AuditSession_{timestamp}.log` covers the full run across all accounts.
 
 A summary table (Passed / Failed / Partial / Not Tested) is printed at the end of each run.
 
@@ -157,7 +204,8 @@ A summary table (Passed / Failed / Partial / Not Tested) is printed at the end o
 - **`AccessDenied` on `AssumeRole`** — normal with SSO. Set `"auth_mode": "sso_profile"` in `accounts.json` and add a `profile` per account matching `~/.aws/config`. Do not use manual `sts assume-role` for cross-account SSO access.
 - **`No valid SSO profile`** — add `profile` to the account entry or ensure `sso_account_id` in `~/.aws/config` matches the account `id`.
 - **`ExpiredToken` / SSO session expired** — run `aws sso login --profile PROD-SEC` again.
-- **`PARTIAL` with "API call returned null"** — the SSO role may lack read permission for that service API.
+- **`PARTIAL` with "API call returned null"** — the SSO role may lack read permission for that service API. Check `output/{AccountName}_{AccountId}/errors/AuditDiagnostics_{Domain}_{timestamp}.log` for the failed `aws` command and CLI error text.
+- **PowerShell exceptions in results** — open the diagnostics log for the full exception, stack trace, and CLI commands from that control.
 - **`NOT_TESTED` with "Global control - checked in eu-west-1 only"** — some org-wide controls run only in `eu-west-1`; review results from that region.
 
 ---
@@ -256,13 +304,16 @@ Le scanner parcourt chaque compte non exclu, assume `CCOE_SecurityAudit`, exécu
 
 ### Étape 6 — Consulter les résultats
 
-**Sortie du scan** — un fichier par compte et par exécution :
+Chaque compte scanné dispose de son propre dossier sous `output/` :
 
 ```
-output/{AccountName}_{AccountId}_{Domain}_{timestamp}.json
+output/{AccountName}_{AccountId}/
+├── {Domain}_{timestamp}.json
+├── evidence/{Domain}_{timestamp}_evidence.json
+└── errors/AuditDiagnostics_{Domain}_{timestamp}.log
 ```
 
-Chaque fichier contient `metadata` (compte, domaine, auditeur, régions) et un tableau `results`. Chaque résultat inclut :
+**Fichier de résultats** — contient `metadata` et le tableau `results` :
 
 | Champ | Signification |
 |-------|---------------|
@@ -271,7 +322,11 @@ Chaque fichier contient `metadata` (compte, domaine, auditeur, régions) et un t
 | `Evidence` | Données structurées collectées par le contrôle |
 | `Notes` | Contexte lisible pour l'auditeur |
 
-**Journal de session** — enregistré dans `output/errors/AuditSession_{timestamp}.log`.
+**Fichier de preuves** — contrôles avec preuves ou commandes CLI capturées.
+
+**Diagnostics par compte** — exceptions PowerShell et échecs `aws` pour ce compte uniquement.
+
+**Journal de session** — `output/log/AuditSession_{timestamp}.log` pour l'exécution complète.
 
 Un tableau récapitulatif (Passed / Failed / Partial / Not Tested) s'affiche à la fin de chaque exécution.
 
@@ -303,5 +358,6 @@ Un tableau récapitulatif (Passed / Failed / Partial / Not Tested) s'affiche à 
 - **`AccessDenied` sur `AssumeRole`** — normal avec SSO. Définissez `"auth_mode": "sso_profile"` dans `accounts.json` et un champ `profile` par compte correspondant à `~/.aws/config`.
 - **`No valid SSO profile`** — ajoutez `profile` à l'entrée du compte ou vérifiez que `sso_account_id` dans `~/.aws/config` correspond à l'`id` du compte.
 - **`ExpiredToken` / session SSO expirée** — relancez `aws sso login --profile PROD-SEC`.
-- **`PARTIAL` avec "API call returned null"** — le rôle SSO peut ne pas avoir les droits de lecture sur l'API concernée.
+- **`PARTIAL` avec "API call returned null"** — le rôle SSO peut ne pas avoir les droits de lecture sur l'API concernée. Consultez `output/{AccountName}_{AccountId}/errors/AuditDiagnostics_{Domaine}_{timestamp}.log`.
+- **Exceptions PowerShell dans les résultats** — ouvrez le journal de diagnostic pour l'exception complète, la pile d'appels et les commandes CLI du contrôle.
 - **`NOT_TESTED` avec "Global control - checked in eu-west-1 only"** — certains contrôles organisationnels ne s'exécutent qu'en `eu-west-1`.
