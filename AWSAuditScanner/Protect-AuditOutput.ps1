@@ -12,6 +12,11 @@
     evidence structure, and counts so an AI evaluator can assess audit quality
     without seeing real AWS account or resource identifiers.
 
+    Resource coverage includes TGW attachments, VPC flow logs, CloudWatch log
+    groups/streams, S3 buckets, KMS keys/aliases, and hyphenated AWS service
+    IDs (vpc-, subnet-, fl-, tgw-attach-, etc.) plus a generic fallback for
+    remaining prefix-hex identifiers.
+
     IMPORTANT: Do not share the optional mapping file with the AI evaluator.
     It is the only file that links pseudonyms back to real account names.
 
@@ -179,6 +184,270 @@ function Get-ResourcePseudonym {
     return ('{0}-{1:D4}' -f $Prefix, $Script:Anonymization.ResourceCounters[$Prefix])
 }
 
+function Get-AwsHyphenatedResourcePatterns {
+    # Longer prefixes first so e.g. tgw-attach matches before tgw.
+    $prefixes = @(
+        'tgw-attach'
+        'vpce-svc'
+        'cvpn-endpoint'
+        'ipam-pool'
+        'ipam-scope'
+        'vpn-connection'
+        'replicationgroup'
+        'cache-cluster'
+        'eipalloc'
+        'ipalloc'
+        'customer-gateway'
+        'fsmt'
+        'fsap'
+        'snap'
+        'subnet'
+        'vpce'
+        'pcx'
+        'rtb'
+        'acl'
+        'eni'
+        'vol'
+        'ami'
+        'vpc'
+        'tgw'
+        'igw'
+        'eigw'
+        'nat'
+        'vgw'
+        'vpn'
+        'cgw'
+        'dopt'
+        'dhcp'
+        'pl'
+        'lgw'
+        'lpg'
+        'fle'
+        'fl'
+        'sg'
+        'sgr'
+        'sgp'
+        'gp'
+        'db'
+        'fs'
+        'esm'
+        'elb'
+        'arn'
+        'cb'
+        'cr'
+        'ls'
+        'ni'
+        'net'
+        'efa'
+        'i'
+    ) | Sort-Object { $_.Length } -Descending
+
+    $patterns = @()
+    foreach ($prefix in $prefixes) {
+        $escaped = [regex]::Escape($prefix)
+        $patterns += @{
+            Prefix  = $prefix
+            Pattern = ('\b{0}-[0-9a-f]{{8,32}}\b' -f $escaped)
+        }
+    }
+
+    return $patterns
+}
+
+function Protect-AwsPrefixedResourceIds {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Text
+    )
+
+    $result = $Text
+    foreach ($entry in (Get-AwsHyphenatedResourcePatterns)) {
+        $prefix = $entry.Prefix
+        $pattern = $entry.Pattern
+        while ($result -match $pattern) {
+            $replacement = Get-ResourcePseudonym -Prefix $prefix
+            $result = [regex]::Replace($result, $pattern, $replacement, 1)
+        }
+    }
+
+    return $result
+}
+
+function Protect-AwsGenericHyphenatedIds {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Text
+    )
+
+    # Catch-all for service-prefix-hex IDs not covered above.
+    # Skips regions (e.g. eu-west-1), control IDs (NET-03), and pseudonyms (ACCOUNT-001).
+    $pattern = '\b(?!(?:eu|us|ap|sa|ca|me|af|cn|il|mx)-)([a-z][a-z0-9]{1,22})-([0-9a-f]{8,32})\b'
+    $result = $Text
+
+    $guard = 0
+    while ($result -match $pattern) {
+        $prefix = $Matches[1]
+        if ($prefix -match '^(?:account|profile|redacted|log|kms|hostedzone)$' -or $prefix -match '^\d+$') {
+            $result = [regex]::Replace($result, $pattern, '[REDACTED-AWS-ID]', 1)
+        }
+        else {
+            $replacement = Get-ResourcePseudonym -Prefix $prefix
+            $result = [regex]::Replace($result, $pattern, $replacement, 1)
+        }
+
+        $guard++
+        if ($guard -gt 5000) {
+            break
+        }
+    }
+
+    return $result
+}
+
+function Protect-AwsLogIdentifiers {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Text
+    )
+
+    $result = $Text
+
+    # CloudWatch / CloudTrail / VPC flow log paths and names.
+    $logPathPattern = '/aws/[a-zA-Z0-9_./-]+'
+    while ($result -match $logPathPattern) {
+        $replacement = Get-ResourcePseudonym -Prefix 'log-group'
+        $result = [regex]::Replace($result, $logPathPattern, $replacement, 1)
+    }
+
+    $logFieldReplacements = @(
+        @{ Match = '"flow_log_id"\s*:\s*"[^"]*"'; Replace = '"flow_log_id": "[REDACTED-LOG-ID]"' }
+        @{ Match = '"FlowLogId"\s*:\s*"[^"]*"'; Replace = '"FlowLogId": "[REDACTED-LOG-ID]"' }
+        @{ Match = '"log_group"\s*:\s*"[^"]*"'; Replace = '"log_group": "[REDACTED-LOG-ID]"' }
+        @{ Match = '"LogGroupName"\s*:\s*"[^"]*"'; Replace = '"LogGroupName": "[REDACTED-LOG-ID]"' }
+        @{ Match = '"log_group_name"\s*:\s*"[^"]*"'; Replace = '"log_group_name": "[REDACTED-LOG-ID]"' }
+        @{ Match = '"logGroupName"\s*:\s*"[^"]*"'; Replace = '"logGroupName": "[REDACTED-LOG-ID]"' }
+        @{ Match = '"log_group_arn"\s*:\s*"[^"]*"'; Replace = '"log_group_arn": "[REDACTED-LOG-ARN]"' }
+        @{ Match = '"LogGroupArn"\s*:\s*"[^"]*"'; Replace = '"LogGroupArn": "[REDACTED-LOG-ARN]"' }
+        @{ Match = '"cloudwatch_log_group"\s*:\s*"[^"]*"'; Replace = '"cloudwatch_log_group": "[REDACTED-LOG-ID]"' }
+        @{ Match = '"stream_name"\s*:\s*"[^"]*"'; Replace = '"stream_name": "[REDACTED-LOG-STREAM]"' }
+        @{ Match = '"logStreamName"\s*:\s*"[^"]*"'; Replace = '"logStreamName": "[REDACTED-LOG-STREAM]"' }
+        @{ Match = '"delivery_channel"\s*:\s*"[^"]*"'; Replace = '"delivery_channel": "[REDACTED-LOG-ID]"' }
+        @{ Match = '"DeliveryChannelName"\s*:\s*"[^"]*"'; Replace = '"DeliveryChannelName": "[REDACTED-LOG-ID]"' }
+        @{ Match = '"trail_name"\s*:\s*"[^"]*"'; Replace = '"trail_name": "[REDACTED-LOG-ID]"' }
+        @{ Match = '"TrailARN"\s*:\s*"[^"]*"'; Replace = '"TrailARN": "[REDACTED-LOG-ARN]"' }
+        @{ Match = '"trail_arn"\s*:\s*"[^"]*"'; Replace = '"trail_arn": "[REDACTED-LOG-ARN]"' }
+        @{ Match = '"s3_key_prefix"\s*:\s*"[^"]*"'; Replace = '"s3_key_prefix": "[REDACTED-LOG-PREFIX]"' }
+        @{ Match = '"id"\s*:\s*"fl-[0-9a-f]+"'; Replace = '"id": "[REDACTED-FLOW-LOG-ID]"' }
+    )
+
+    foreach ($entry in $logFieldReplacements) {
+        $result = [regex]::Replace($result, $entry.Match, $entry.Replace)
+    }
+
+    return $result
+}
+
+function Protect-AwsKmsAndSecrets {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Text
+    )
+
+    $result = $Text
+
+    # KMS key UUIDs and multi-Region keys (mrk-...).
+    while ($result -match '\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b') {
+        $replacement = Get-ResourcePseudonym -Prefix 'kms-key'
+        $result = [regex]::Replace(
+            $result,
+            '\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b',
+            $replacement,
+            1
+        )
+    }
+
+    $result = [regex]::Replace(
+        $result,
+        '\bmrk-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b',
+        '[REDACTED-MRK-KEY]'
+    )
+
+    $aliasPattern = 'alias/[a-zA-Z0-9/_-]+'
+    while ($result -match $aliasPattern) {
+        $replacement = 'alias/{0}' -f (Get-ResourcePseudonym -Prefix 'kms-alias')
+        $result = [regex]::Replace($result, $aliasPattern, $replacement, 1)
+    }
+
+    $kmsFieldReplacements = @(
+        @{ Match = '"key_id"\s*:\s*"[^"]*"'; Replace = '"key_id": "[REDACTED-KMS-KEY]"' }
+        @{ Match = '"KeyId"\s*:\s*"[^"]*"'; Replace = '"KeyId": "[REDACTED-KMS-KEY]"' }
+        @{ Match = '"KeyArn"\s*:\s*"[^"]*"'; Replace = '"KeyArn": "[REDACTED-KMS-ARN]"' }
+        @{ Match = '"kms_key_id"\s*:\s*"[^"]*"'; Replace = '"kms_key_id": "[REDACTED-KMS-KEY]"' }
+        @{ Match = '"KmsKeyId"\s*:\s*"[^"]*"'; Replace = '"KmsKeyId": "[REDACTED-KMS-KEY]"' }
+        @{ Match = '"master_key_id"\s*:\s*"[^"]*"'; Replace = '"master_key_id": "[REDACTED-KMS-KEY]"' }
+        @{ Match = '"MasterKeyId"\s*:\s*"[^"]*"'; Replace = '"MasterKeyId": "[REDACTED-KMS-KEY]"' }
+        @{ Match = '"customer_master_key"\s*:\s*"[^"]*"'; Replace = '"customer_master_key": "[REDACTED-KMS-KEY]"' }
+    )
+
+    foreach ($entry in $kmsFieldReplacements) {
+        $result = [regex]::Replace($result, $entry.Match, $entry.Replace)
+    }
+
+    $result = [regex]::Replace(
+        $result,
+        'arn:aws:kms:[a-z0-9-]+:[^:]+:key/[0-9a-f-]+',
+        '[REDACTED-KMS-ARN]'
+    )
+
+    return $result
+}
+
+function Protect-AwsStorageAndDataIdentifiers {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Text
+    )
+
+    $result = $Text
+
+    $result = [regex]::Replace($result, 's3://[a-z0-9.\-_]+', 's3://[REDACTED-BUCKET]')
+    $result = [regex]::Replace($result, 's3a://[a-z0-9.\-_]+', 's3a://[REDACTED-BUCKET]')
+    $result = [regex]::Replace($result, 'https://s3[.-][a-z0-9.-]+\.amazonaws\.com/[a-z0-9.\-_/]+', 'https://s3.[REDACTED-BUCKET].amazonaws.com/[REDACTED-KEY]')
+
+    $storageFieldReplacements = @(
+        @{ Match = '"bucket"\s*:\s*"[^"]*"'; Replace = '"bucket": "[REDACTED-BUCKET]"' }
+        @{ Match = '"Bucket"\s*:\s*"[^"]*"'; Replace = '"Bucket": "[REDACTED-BUCKET]"' }
+        @{ Match = '"bucket_name"\s*:\s*"[^"]*"'; Replace = '"bucket_name": "[REDACTED-BUCKET]"' }
+        @{ Match = '"BucketName"\s*:\s*"[^"]*"'; Replace = '"BucketName": "[REDACTED-BUCKET]"' }
+        @{ Match = '"s3_bucket"\s*:\s*"[^"]*"'; Replace = '"s3_bucket": "[REDACTED-BUCKET]"' }
+        @{ Match = '"S3Bucket"\s*:\s*"[^"]*"'; Replace = '"S3Bucket": "[REDACTED-BUCKET]"' }
+        @{ Match = '"s3BucketName"\s*:\s*"[^"]*"'; Replace = '"s3BucketName": "[REDACTED-BUCKET]"' }
+        @{ Match = '"log_bucket"\s*:\s*"[^"]*"'; Replace = '"log_bucket": "[REDACTED-BUCKET]"' }
+        @{ Match = '"LogBucket"\s*:\s*"[^"]*"'; Replace = '"LogBucket": "[REDACTED-BUCKET]"' }
+        @{ Match = '"target_bucket"\s*:\s*"[^"]*"'; Replace = '"target_bucket": "[REDACTED-BUCKET]"' }
+        @{ Match = '"source_bucket"\s*:\s*"[^"]*"'; Replace = '"source_bucket": "[REDACTED-BUCKET]"' }
+        @{ Match = '"table_name"\s*:\s*"[^"]*"'; Replace = '"table_name": "[REDACTED-TABLE]"' }
+        @{ Match = '"TableName"\s*:\s*"[^"]*"'; Replace = '"TableName": "[REDACTED-TABLE]"' }
+        @{ Match = '"secret_name"\s*:\s*"[^"]*"'; Replace = '"secret_name": "[REDACTED-SECRET]"' }
+        @{ Match = '"SecretId"\s*:\s*"[^"]*"'; Replace = '"SecretId": "[REDACTED-SECRET]"' }
+        @{ Match = '"secret_arn"\s*:\s*"[^"]*"'; Replace = '"secret_arn": "[REDACTED-SECRET-ARN]"' }
+        @{ Match = '"parameter_name"\s*:\s*"[^"]*"'; Replace = '"parameter_name": "[REDACTED-PARAMETER]"' }
+        @{ Match = '"ParameterName"\s*:\s*"[^"]*"'; Replace = '"ParameterName": "[REDACTED-PARAMETER]"' }
+    )
+
+    foreach ($entry in $storageFieldReplacements) {
+        $result = [regex]::Replace($result, $entry.Match, $entry.Replace)
+    }
+
+    # Route53 hosted zone IDs.
+    while ($result -match '\bZ[0-9A-Z]{10,32}\b') {
+        $replacement = Get-ResourcePseudonym -Prefix 'hostedzone'
+        $result = [regex]::Replace($result, '\bZ[0-9A-Z]{10,32}\b', $replacement, 1)
+    }
+
+    return $result
+}
+
 function Protect-AuditText {
     param(
         [Parameter(Mandatory = $true)]
@@ -241,40 +510,11 @@ function Protect-AuditText {
         '[REDACTED-EMAIL]'
     )
 
-    $resourcePatterns = @(
-        @{ Prefix = 'vpc'; Pattern = '\bvpc-[0-9a-f]{8,17}\b' }
-        @{ Prefix = 'subnet'; Pattern = '\bsubnet-[0-9a-f]{8,17}\b' }
-        @{ Prefix = 'sg'; Pattern = '\bsg-[0-9a-f]{8,17}\b' }
-        @{ Prefix = 'i'; Pattern = '\bi-[0-9a-f]{8,17}\b' }
-        @{ Prefix = 'ami'; Pattern = '\bami-[0-9a-f]{8,17}\b' }
-        @{ Prefix = 'vol'; Pattern = '\bvol-[0-9a-f]{8,17}\b' }
-        @{ Prefix = 'eni'; Pattern = '\beni-[0-9a-f]{8,17}\b' }
-        @{ Prefix = 'rtb'; Pattern = '\brtb-[0-9a-f]{8,17}\b' }
-        @{ Prefix = 'igw'; Pattern = '\bigw-[0-9a-f]{8,17}\b' }
-        @{ Prefix = 'nat'; Pattern = '\bnat-[0-9a-f]{8,17}\b' }
-        @{ Prefix = 'pl'; Pattern = '\bpl-[0-9a-f]{8,17}\b' }
-        @{ Prefix = 'pcx'; Pattern = '\bpcx-[0-9a-f]{8,17}\b' }
-        @{ Prefix = 'tgw'; Pattern = '\btgw-[0-9a-f]{8,17}\b' }
-        @{ Prefix = 'acl'; Pattern = '\bacl-[0-9a-f]{8,17}\b' }
-        @{ Prefix = 'vpce'; Pattern = '\bvpce-[0-9a-f]{8,17}\b' }
-        @{ Prefix = 'elb'; Pattern = '\belb-[0-9a-f]{8,17}\b' }
-        @{ Prefix = 'arn'; Pattern = '\barn-[0-9a-f]{8,17}\b' }
-        @{ Prefix = 'fs'; Pattern = '\bfs-[0-9a-f]{8,17}\b' }
-        @{ Prefix = 'db'; Pattern = '\bdb-[0-9a-f]{8,17}\b' }
-        @{ Prefix = 'cluster'; Pattern = '\bcluster-[0-9a-f]{8,17}\b' }
-    )
-
-    foreach ($entry in $resourcePatterns) {
-        $prefix = $entry.Prefix
-        $pattern = $entry.Pattern
-        while ($result -match $pattern) {
-            $replacement = Get-ResourcePseudonym -Prefix $prefix
-            $result = [regex]::Replace($result, $pattern, $replacement, 1)
-        }
-    }
-
-    $result = [regex]::Replace($result, 's3://[a-z0-9.\-_]+', 's3://[REDACTED-BUCKET]')
-    $result = [regex]::Replace($result, '"bucket(?:_name)?"\s*:\s*"[^"]+"', '"bucket": "[REDACTED-BUCKET]"')
+    $result = Protect-AwsPrefixedResourceIds -Text $result
+    $result = Protect-AwsLogIdentifiers -Text $result
+    $result = Protect-AwsKmsAndSecrets -Text $result
+    $result = Protect-AwsStorageAndDataIdentifiers -Text $result
+    $result = Protect-AwsGenericHyphenatedIds -Text $result
 
     $result = [regex]::Replace(
         $result,
