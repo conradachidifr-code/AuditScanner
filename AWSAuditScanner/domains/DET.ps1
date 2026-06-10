@@ -20,8 +20,8 @@ function Get-DomainChecks {
             }
 
             $detectorCount = 0
-            if ($data.DetectorIds) {
-                $detectorCount = @($data.DetectorIds).Count
+            if (Test-AuditHasProperty -Object $data -PropertyName 'DetectorIds') {
+                $detectorCount = (Get-AuditCollectionCount $data.DetectorIds)
             }
 
             if ($detectorCount -gt 0) {
@@ -58,7 +58,7 @@ function Get-DomainChecks {
             }
 
             $hubArn = $null
-            if ($data.HubArn) {
+            if (Test-AuditHasProperty -Object $data -PropertyName 'HubArn') {
                 $hubArn = [string]$data.HubArn
             }
 
@@ -101,8 +101,8 @@ function Get-DomainChecks {
             }
 
             $standardCount = 0
-            if ($data.StandardsSubscriptions) {
-                $standardCount = @($data.StandardsSubscriptions).Count
+            if (Test-AuditHasProperty -Object $data -PropertyName 'StandardsSubscriptions') {
+                $standardCount = (Get-AuditCollectionCount $data.StandardsSubscriptions)
             }
 
             if ($standardCount -gt 0) {

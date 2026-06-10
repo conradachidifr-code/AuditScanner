@@ -28,7 +28,7 @@ function Get-GovScpSummaries {
         return $null
     }
 
-    if ($data.Policies) {
+    if (Test-AuditHasProperty -Object $data -PropertyName 'Policies') {
         return @($data.Policies)
     }
 
@@ -49,11 +49,11 @@ function Get-GovPolicyDocumentText {
         return $null
     }
 
-    if (-not $data.Policy) {
+    if (-not (Test-AuditHasProperty -Object $data -PropertyName 'Policy')) {
         return $null
     }
 
-    if (-not $data.Policy.Content) {
+    if (-not (Test-AuditHasProperty -Object $data -PropertyName 'Policy').Content) {
         return $null
     }
 
@@ -66,7 +66,7 @@ function Get-GovTaggedResourceStats {
         [string]$Region
     )
 
-    $resources = @()
+    $resources = New-AuditList
     $paginationToken = $null
 
     do {
@@ -80,25 +80,27 @@ function Get-GovTaggedResourceStats {
             return $null
         }
 
-        if ($data.ResourceTagMappingList) {
-            $resources += @($data.ResourceTagMappingList)
+        if (Test-AuditHasProperty -Object $data -PropertyName 'ResourceTagMappingList') {
+            foreach ($resource in (Get-AuditCliArray $data.ResourceTagMappingList)) {
+                [void]$resources.Add($resource)
+            }
         }
 
         $paginationToken = $null
-        if ($data.PSObject.Properties.Name -contains 'PaginationToken') {
+        if ((Test-AuditHasProperty -Object $data -PropertyName 'PaginationToken')) {
             if (-not [string]::IsNullOrWhiteSpace([string]$data.PaginationToken)) {
                 $paginationToken = [string]$data.PaginationToken
             }
         }
     } while ($paginationToken)
 
-    $totalCount = $resources.Count
+    $totalCount = (Get-AuditCollectionCount $resources)
     $ownerTaggedCount = 0
 
     foreach ($resource in $resources) {
         $hasOwnerTag = $false
-        if ($resource.Tags) {
-            foreach ($tag in $resource.Tags) {
+        if (Test-AuditHasProperty -Object $resource -PropertyName 'Tags') {
+            foreach ($tag in (Get-AuditCliArray $resource.$Tags)) {
                 if ($tag.Key -eq 'Owner' -or $tag.Key -eq 'owner') {
                     if (-not [string]::IsNullOrWhiteSpace([string]$tag.Value)) {
                         $hasOwnerTag = $true
@@ -191,7 +193,7 @@ function Get-DomainChecks {
 
             $policyNames = @()
             foreach ($policy in $scps) {
-                if ($policy.Name) {
+                if (Test-AuditHasProperty -Object $policy -PropertyName 'Name') {
                     $policyNames += [string]$policy.Name
                 }
             }
@@ -203,7 +205,7 @@ function Get-DomainChecks {
                 -ControlId 'GOV-05' `
                 -Status 'PARTIAL' `
                 -Evidence @{
-                    scp_count    = $scps.Count
+                    scp_count    = (Get-AuditCollectionCount $scps)
                     policy_names = @($policyNames)
                 } `
                 -Notes 'Verify derogation process and JIRA FED registry during workshop.'
@@ -227,8 +229,8 @@ function Get-DomainChecks {
             }
 
             $eventCount = 0
-            if ($data.Events) {
-                $eventCount = @($data.Events).Count
+            if (Test-AuditHasProperty -Object $data -PropertyName 'Events') {
+                $eventCount = (Get-AuditCollectionCount $data.Events)
             }
 
             return New-AuditResult `
@@ -320,7 +322,7 @@ function Get-DomainChecks {
             }
 
             $tagPolicies = @()
-            if ($tagPolicyData.Policies) {
+            if (Test-AuditHasProperty -Object $tagPolicyData -PropertyName 'Policies') {
                 $tagPolicies = @($tagPolicyData.Policies)
             }
 
@@ -330,12 +332,12 @@ function Get-DomainChecks {
                 if ($policyDetail -and $policyDetail.Policy -and $policyDetail.Policy.Name) {
                     $tagPolicyNames += [string]$policyDetail.Policy.Name
                 }
-                elseif ($policy.Name) {
+                elseif (Test-AuditHasProperty -Object $policy -PropertyName 'Name') {
                     $tagPolicyNames += [string]$policy.Name
                 }
             }
 
-            if ($tagPolicyNames.Count -gt 0) {
+            if ((Get-AuditCollectionCount $tagPolicyNames) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId `
                     -AccountName $AccountName `
@@ -343,7 +345,7 @@ function Get-DomainChecks {
                     -ControlId 'GOV-08' `
                     -Status 'PASS' `
                     -Evidence @{
-                        tag_policy_count = $tagPolicyNames.Count
+                        tag_policy_count = (Get-AuditCollectionCount $tagPolicyNames)
                         policy_names     = @($tagPolicyNames)
                     } `
                     -Notes 'Tag policy exists at organization level'
@@ -356,7 +358,7 @@ function Get-DomainChecks {
 
             $tagRelatedScpCount = 0
             foreach ($scp in $scps) {
-                if (-not $scp.Id) {
+                if (-not (Test-AuditHasProperty -Object $scp -PropertyName 'Id')) {
                     continue
                 }
 
@@ -380,7 +382,7 @@ function Get-DomainChecks {
                     -Evidence @{
                         tag_policy_count      = 0
                         tag_related_scp_count = $tagRelatedScpCount
-                        scp_count             = $scps.Count
+                        scp_count             = (Get-AuditCollectionCount $scps)
                     } `
                     -Notes 'Tags exist via SCP but no formal tag policy'
             }
@@ -394,7 +396,7 @@ function Get-DomainChecks {
                 -Evidence @{
                     tag_policy_count      = 0
                     tag_related_scp_count = 0
-                    scp_count             = $scps.Count
+                    scp_count             = (Get-AuditCollectionCount $scps)
                 } `
                 -Notes 'No tag governance found'
         }
@@ -431,7 +433,7 @@ function Get-DomainChecks {
                 return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'GOV-11'
             }
 
-            if ($scps.Count -eq 0) {
+            if ((Get-AuditCollectionCount $scps) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId `
                     -AccountName $AccountName `
@@ -446,7 +448,7 @@ function Get-DomainChecks {
             $hasRootOrOuTarget = $false
 
             foreach ($scp in $scps) {
-                if (-not $scp.Id) {
+                if (-not (Test-AuditHasProperty -Object $scp -PropertyName 'Id')) {
                     continue
                 }
 
@@ -455,13 +457,13 @@ function Get-DomainChecks {
                     continue
                 }
 
-                if (-not $targetData.Targets) {
+                if (-not (Test-AuditHasProperty -Object $targetData -PropertyName 'Targets')) {
                     continue
                 }
 
-                foreach ($target in $targetData.Targets) {
+                foreach ($target in (Get-AuditCliArray $targetData.$Targets)) {
                     $targetType = $null
-                    if ($target.PSObject.Properties.Name -contains 'Type') {
+                    if ((Test-AuditHasProperty -Object $target -PropertyName 'Type')) {
                         $targetType = [string]$target.Type
                     }
 
@@ -488,7 +490,7 @@ function Get-DomainChecks {
                     -ControlId 'GOV-11' `
                     -Status 'PASS' `
                     -Evidence @{
-                        scp_count = $scps.Count
+                        scp_count = (Get-AuditCollectionCount $scps)
                         targets   = @($targetsEvidence)
                     } `
                     -Notes 'SCPs exist targeting OU root or management'
@@ -501,7 +503,7 @@ function Get-DomainChecks {
                 -ControlId 'GOV-11' `
                 -Status 'FAIL' `
                 -Evidence @{
-                    scp_count = $scps.Count
+                    scp_count = (Get-AuditCollectionCount $scps)
                     targets   = @($targetsEvidence)
                 } `
                 -Notes 'No SCP targets found on OU root or organizational units'
@@ -524,7 +526,7 @@ function Get-DomainChecks {
                 return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'GOV-12'
             }
 
-            if ($scps.Count -eq 0) {
+            if ((Get-AuditCollectionCount $scps) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId `
                     -AccountName $AccountName `
@@ -540,7 +542,7 @@ function Get-DomainChecks {
             $matchedPolicyNames = @()
 
             foreach ($scp in $scps) {
-                if (-not $scp.Id) {
+                if (-not (Test-AuditHasProperty -Object $scp -PropertyName 'Id')) {
                     continue
                 }
 
@@ -552,7 +554,7 @@ function Get-DomainChecks {
 
                 if ($content -match 'aws:RequestedRegion') {
                     $regionRestrictedCount++
-                    if ($scp.Name) {
+                    if (Test-AuditHasProperty -Object $scp -PropertyName 'Name') {
                         $matchedPolicyNames += [string]$scp.Name
                     }
                 }
@@ -566,7 +568,7 @@ function Get-DomainChecks {
                     -ControlId 'GOV-12' `
                     -Status 'PASS' `
                     -Evidence @{
-                        scp_count                   = $scps.Count
+                        scp_count                   = (Get-AuditCollectionCount $scps)
                         region_restricted_scp_count = $regionRestrictedCount
                         policy_names                = @($matchedPolicyNames)
                     } `
@@ -581,7 +583,7 @@ function Get-DomainChecks {
                     -ControlId 'GOV-12' `
                     -Status 'PARTIAL' `
                     -Evidence @{
-                        scp_count                   = $scps.Count
+                        scp_count                   = (Get-AuditCollectionCount $scps)
                         region_restricted_scp_count = 0
                         unreadable_policy_count     = $unreadablePolicyCount
                     } `
@@ -595,7 +597,7 @@ function Get-DomainChecks {
                 -ControlId 'GOV-12' `
                 -Status 'FAIL' `
                 -Evidence @{
-                    scp_count                   = $scps.Count
+                    scp_count                   = (Get-AuditCollectionCount $scps)
                     region_restricted_scp_count = 0
                 } `
                 -Notes 'No region restriction found in any SCP'
@@ -646,7 +648,7 @@ function Get-DomainChecks {
             }
 
             $functions = @()
-            if ($data.Functions) {
+            if (Test-AuditHasProperty -Object $data -PropertyName 'Functions') {
                 $functions = @($data.Functions)
             }
 
@@ -655,18 +657,18 @@ function Get-DomainChecks {
 
             foreach ($function in $functions) {
                 $runtime = 'unknown'
-                if ($function.Runtime) {
+                if (Test-AuditHasProperty -Object $function -PropertyName 'Runtime') {
                     $runtime = [string]$function.Runtime
                 }
 
-                if (-not $runtimeSummary.ContainsKey($runtime)) {
+                if (-not (Test-AuditHasProperty -Object $runtimeSummary -PropertyName 'ContainsKey')($runtime)) {
                     $runtimeSummary[$runtime] = 0
                 }
                 $runtimeSummary[$runtime] = $runtimeSummary[$runtime] + 1
 
                 if ($deprecatedRuntimes -contains $runtime) {
                     $functionName = ''
-                    if ($function.FunctionName) {
+                    if (Test-AuditHasProperty -Object $function -PropertyName 'FunctionName') {
                         $functionName = [string]$function.FunctionName
                     }
 
@@ -678,12 +680,12 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                function_count        = $functions.Count
+                function_count        = (Get-AuditCollectionCount $functions)
                 runtimes              = $runtimeSummary
                 deprecated_functions  = @($deprecatedFunctions)
             }
 
-            if ($deprecatedFunctions.Count -gt 0) {
+            if ((Get-AuditCollectionCount $deprecatedFunctions) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId `
                     -AccountName $AccountName `
@@ -733,11 +735,11 @@ function Get-DomainChecks {
 
             $trailCount = 0
             $activeTrailCount = 0
-            if ($trailData.trailList) {
-                $trailCount = @($trailData.trailList).Count
+            if (Test-AuditHasProperty -Object $trailData -PropertyName 'trailList') {
+                $trailCount = (Get-AuditCollectionCount $trailData.trailList)
 
-                foreach ($trail in $trailData.trailList) {
-                    if (-not $trail.Name) {
+                foreach ($trail in (Get-AuditCliArray $trailData.$trailList)) {
+                    if (-not (Test-AuditHasProperty -Object $trail -PropertyName 'Name')) {
                         continue
                     }
 
@@ -746,7 +748,7 @@ function Get-DomainChecks {
                         continue
                     }
 
-                    if ($statusData.IsLogging) {
+                    if (Test-AuditHasProperty -Object $statusData -PropertyName 'IsLogging') {
                         $activeTrailCount++
                     }
                 }
@@ -759,19 +761,19 @@ function Get-DomainChecks {
             $recorderCount = 0
 
             if ($null -ne $recorderData) {
-                if ($recorderData.ConfigurationRecorders) {
+                if (Test-AuditHasProperty -Object $recorderData -PropertyName 'ConfigurationRecorders') {
                     $recorders = @($recorderData.ConfigurationRecorders)
-                    $recorderCount = $recorders.Count
+                    $recorderCount = (Get-AuditCollectionCount $recorders)
 
                     if ($recorderCount -gt 0) {
                         $recorderNames = @()
                         foreach ($recorder in $recorders) {
-                            if ($recorder.Name) {
+                            if (Test-AuditHasProperty -Object $recorder -PropertyName 'Name') {
                                 $recorderNames += [string]$recorder.Name
                             }
                         }
 
-                        if ($recorderNames.Count -gt 0) {
+                        if ((Get-AuditCollectionCount $recorderNames) -gt 0) {
                             $statusArgs = @('config', 'describe-configuration-recorder-status')
                             foreach ($recorderName in $recorderNames) {
                                 $statusArgs += @('--configuration-recorder-names', $recorderName)
@@ -779,8 +781,8 @@ function Get-DomainChecks {
 
                             $recorderStatusData = Invoke-AWSCLI -Arguments $statusArgs -Region $Region
                             if ($null -ne $recorderStatusData) {
-                                if ($recorderStatusData.ConfigurationRecordersStatus) {
-                                    foreach ($recorderStatus in $recorderStatusData.ConfigurationRecordersStatus) {
+                                if (Test-AuditHasProperty -Object $recorderStatusData -PropertyName 'ConfigurationRecordersStatus') {
+                                    foreach ($recorderStatus in (Get-AuditCliArray $recorderStatusData.$ConfigurationRecordersStatus)) {
                                         if ($recorderStatus.recording -eq $true) {
                                             $configRecorderActive = $true
                                             break

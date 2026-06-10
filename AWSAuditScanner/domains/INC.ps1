@@ -27,7 +27,7 @@ function Get-IncOrganizationRoots {
         return $null
     }
 
-    if ($data.Roots) {
+    if (Test-AuditHasProperty -Object $data -PropertyName 'Roots') {
         return @($data.Roots)
     }
 
@@ -43,7 +43,7 @@ function Get-IncOrganizationalUnits {
         [string]$ParentId
     )
 
-    $units = @()
+    $units = New-AuditList
     $token = $null
 
     do {
@@ -57,19 +57,21 @@ function Get-IncOrganizationalUnits {
             return $null
         }
 
-        if ($data.OrganizationalUnits) {
-            $units += @($data.OrganizationalUnits)
+        if (Test-AuditHasProperty -Object $data -PropertyName 'OrganizationalUnits') {
+            foreach ($unit in (Get-AuditCliArray $data.OrganizationalUnits)) {
+                [void]$units.Add($unit)
+            }
         }
 
         $token = $null
-        if ($data.PSObject.Properties.Name -contains 'NextToken') {
+        if ((Test-AuditHasProperty -Object $data -PropertyName 'NextToken')) {
             if (-not [string]::IsNullOrWhiteSpace([string]$data.NextToken)) {
                 $token = [string]$data.NextToken
             }
         }
     } while ($token)
 
-    return $units
+    return $units.ToArray()
 }
 
 function Test-IncQuarantineOuName {
@@ -98,17 +100,17 @@ function Get-IncScpPolicyDocuments {
     }
 
     $documents = @()
-    if (-not $listData.Policies) {
+    if (-not (Test-AuditHasProperty -Object $listData -PropertyName 'Policies')) {
         return @()
     }
 
-    foreach ($policy in $listData.Policies) {
-        if (-not $policy.Id) {
+    foreach ($policy in (Get-AuditCliArray $listData.$Policies)) {
+        if (-not (Test-AuditHasProperty -Object $policy -PropertyName 'Id')) {
             continue
         }
 
         $describeData = Invoke-AWSCLI -Arguments @('organizations', 'describe-policy', '--policy-id', $policy.Id) -Region $Region
-        if ($null -eq $describeData -or -not $describeData.Policy) {
+        if ($null -eq $describeData -or -not (Test-AuditHasProperty -Object $describeData -PropertyName 'Policy')) {
             continue
         }
 
@@ -178,8 +180,8 @@ function Get-DomainChecks {
             $cloudTrailRules = @()
             $configRules = @()
 
-            if ($data.Rules) {
-                foreach ($rule in $data.Rules) {
+            if (Test-AuditHasProperty -Object $data -PropertyName 'Rules') {
+                foreach ($rule in (Get-AuditCliArray $data.$Rules)) {
                     $ruleName = [string]$rule.Name
                     $eventPattern = [string]$rule.EventPattern
                     $combined = ($ruleName + ' ' + $eventPattern)
@@ -202,13 +204,13 @@ function Get-DomainChecks {
                 config_rules     = @($configRules)
             }
 
-            if ($guardDutyRules.Count -gt 0 -and $cloudTrailRules.Count -gt 0 -and $configRules.Count -gt 0) {
+            if ((Get-AuditCollectionCount $guardDutyRules) -gt 0 -and (Get-AuditCollectionCount $cloudTrailRules) -gt 0 -and (Get-AuditCollectionCount $configRules) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'INC-03' `
                     -Status 'PASS' -Evidence $evidence -Notes 'EventBridge rules cover GuardDuty, CloudTrail, and Config events'
             }
 
-            if ($guardDutyRules.Count -gt 0 -or $cloudTrailRules.Count -gt 0 -or $configRules.Count -gt 0) {
+            if ((Get-AuditCollectionCount $guardDutyRules) -gt 0 -or (Get-AuditCollectionCount $cloudTrailRules) -gt 0 -or (Get-AuditCollectionCount $configRules) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'INC-03' `
                     -Status 'PARTIAL' -Evidence $evidence -Notes 'Some incident detection rules exist but not all required sources are covered'
@@ -243,7 +245,7 @@ function Get-DomainChecks {
                 return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'INC-06'
             }
 
-            if ($roots.Count -eq 0) {
+            if ((Get-AuditCollectionCount $roots) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'INC-06' `
                     -Status 'FAIL' -Evidence @{ root_count = 0 } -Notes 'No organization roots found'
@@ -253,7 +255,7 @@ function Get-DomainChecks {
             $quarantineOus = @()
 
             foreach ($root in $roots) {
-                if (-not $root.Id) {
+                if (-not (Test-AuditHasProperty -Object $root -PropertyName 'Id')) {
                     continue
                 }
 
@@ -275,12 +277,12 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                ou_count        = $allOuNames.Count
+                ou_count        = (Get-AuditCollectionCount $allOuNames)
                 ou_names        = @($allOuNames)
                 quarantine_ous  = @($quarantineOus)
             }
 
-            if ($quarantineOus.Count -gt 0) {
+            if ((Get-AuditCollectionCount $quarantineOus) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'INC-06' `
                     -Status 'PASS' -Evidence $evidence -Notes 'Bouton rouge procedure confirmed with REX August 2023.'
@@ -298,7 +300,7 @@ function Get-DomainChecks {
             $isolationGroups = @()
 
             if ($sgData -and $sgData.SecurityGroups) {
-                foreach ($sg in $sgData.SecurityGroups) {
+                foreach ($sg in (Get-AuditCliArray $sgData.$SecurityGroups)) {
                     $groupName = [string]$sg.GroupName
                     $description = [string]$sg.Description
                     $combined = ($groupName + ' ' + $description).ToLower()
@@ -329,7 +331,7 @@ function Get-DomainChecks {
                 quarantine_scps           = @($quarantineScps)
             }
 
-            if ($isolationGroups.Count -gt 0 -or $quarantineScps.Count -gt 0) {
+            if ((Get-AuditCollectionCount $isolationGroups) -gt 0 -or (Get-AuditCollectionCount $quarantineScps) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'INC-07' `
                     -Status 'PASS' -Evidence $evidence -Notes 'Isolation security group or quarantine SCP detected'
@@ -362,8 +364,8 @@ function Get-DomainChecks {
             }
 
             $forensicsBuckets = @()
-            if ($data.Buckets) {
-                foreach ($bucket in $data.Buckets) {
+            if (Test-AuditHasProperty -Object $data -PropertyName 'Buckets') {
+                foreach ($bucket in (Get-AuditCliArray $data.$Buckets)) {
                     $bucketName = [string]$bucket.Name
                     $lowerName = $bucketName.ToLower()
                     if ($lowerName -match 'forensic|forensics|evidence|chain-of-custody|incident') {
@@ -376,7 +378,7 @@ function Get-DomainChecks {
                 -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'INC-09' `
                 -Status 'NOT_TESTED' `
                 -Evidence @{
-                    forensics_bucket_count = $forensicsBuckets.Count
+                    forensics_bucket_count = (Get-AuditCollectionCount $forensicsBuckets)
                     forensics_buckets      = @($forensicsBuckets)
                 } `
                 -Notes 'Verify forensics procedure: evidence preservation, chain of custody.'
@@ -443,9 +445,9 @@ function Get-DomainChecks {
             $assumeRoleCount = 0
             $breakGlassCount = 0
 
-            if ($data.Events) {
-                $assumeRoleCount = @($data.Events).Count
-                foreach ($event in $data.Events) {
+            if (Test-AuditHasProperty -Object $data -PropertyName 'Events') {
+                $assumeRoleCount = (Get-AuditCollectionCount $data.Events)
+                foreach ($event in (Get-AuditCliArray $data.$Events)) {
                     $eventText = [string]$event.CloudTrailEvent
                     if ($eventText -match 'BreakGlass|Emergency|Incident|Quarantine') {
                         $breakGlassCount++

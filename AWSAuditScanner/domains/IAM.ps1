@@ -111,7 +111,7 @@ function Get-IamAccountSummaryMap {
         return $null
     }
 
-    if (-not $data.SummaryMap) {
+    if (-not (Test-AuditHasProperty -Object $data -PropertyName 'SummaryMap')) {
         return @{}
     }
 
@@ -124,7 +124,7 @@ function Get-IamAllUsers {
         [string]$Region
     )
 
-    $users = @()
+    $users = New-AuditList
     $marker = $null
 
     do {
@@ -138,13 +138,15 @@ function Get-IamAllUsers {
             return $null
         }
 
-        if ($data.Users) {
-            $users += @($data.Users)
+        if (Test-AuditHasProperty -Object $data -PropertyName 'Users') {
+            foreach ($user in (Get-AuditCliArray $data.Users)) {
+                [void]$users.Add($user)
+            }
         }
 
         $marker = $null
         if ($data.IsTruncated -eq $true) {
-            if ($data.PSObject.Properties.Name -contains 'Marker') {
+            if ((Test-AuditHasProperty -Object $data -PropertyName 'Marker')) {
                 if (-not [string]::IsNullOrWhiteSpace([string]$data.Marker)) {
                     $marker = [string]$data.Marker
                 }
@@ -152,7 +154,7 @@ function Get-IamAllUsers {
         }
     } while ($marker)
 
-    return $users
+    return $users.ToArray()
 }
 
 function Get-IamAllRoles {
@@ -161,7 +163,7 @@ function Get-IamAllRoles {
         [string]$Region
     )
 
-    $roles = @()
+    $roles = New-AuditList
     $marker = $null
 
     do {
@@ -175,13 +177,15 @@ function Get-IamAllRoles {
             return $null
         }
 
-        if ($data.Roles) {
-            $roles += @($data.Roles)
+        if (Test-AuditHasProperty -Object $data -PropertyName 'Roles') {
+            foreach ($role in (Get-AuditCliArray $data.Roles)) {
+                [void]$roles.Add($role)
+            }
         }
 
         $marker = $null
         if ($data.IsTruncated -eq $true) {
-            if ($data.PSObject.Properties.Name -contains 'Marker') {
+            if ((Test-AuditHasProperty -Object $data -PropertyName 'Marker')) {
                 if (-not [string]::IsNullOrWhiteSpace([string]$data.Marker)) {
                     $marker = [string]$data.Marker
                 }
@@ -189,7 +193,7 @@ function Get-IamAllRoles {
         }
     } while ($marker)
 
-    return $roles
+    return $roles.ToArray()
 }
 
 function Test-IamUserHasConsoleAccess {
@@ -223,8 +227,8 @@ function Test-IamUserHasMfa {
         return $null
     }
 
-    if ($data.MFADevices) {
-        return (@($data.MFADevices).Count -gt 0)
+    if (Test-AuditHasProperty -Object $data -PropertyName 'MFADevices') {
+        return ((Get-AuditCollectionCount $data.MFADevices) -gt 0)
     }
 
     return $false
@@ -261,8 +265,8 @@ function Get-IamUserAccessKeySummary {
     }
 
     $activeKeys = @()
-    if ($data.AccessKeyMetadata) {
-        foreach ($key in $data.AccessKeyMetadata) {
+    if (Test-AuditHasProperty -Object $data -PropertyName 'AccessKeyMetadata') {
+        foreach ($key in (Get-AuditCliArray $data.$AccessKeyMetadata)) {
             if ($key.Status -eq 'Active') {
                 $activeKeys += $key
             }
@@ -286,11 +290,11 @@ function Test-IamRoleHasAdministratorAccess {
         return $null
     }
 
-    if (-not $data.AttachedPolicies) {
+    if (-not (Test-AuditHasProperty -Object $data -PropertyName 'AttachedPolicies')) {
         return $false
     }
 
-    foreach ($policy in $data.AttachedPolicies) {
+    foreach ($policy in (Get-AuditCliArray $data.$AttachedPolicies)) {
         $policyName = [string]$policy.PolicyName
         $policyArn = [string]$policy.PolicyArn
         if ($policyName -eq 'AdministratorAccess') {
@@ -318,11 +322,11 @@ function Get-IamRoleTrustPolicyText {
         return $null
     }
 
-    if (-not $data.Role) {
+    if (-not (Test-AuditHasProperty -Object $data -PropertyName 'Role')) {
         return $null
     }
 
-    if (-not $data.Role.AssumeRolePolicyDocument) {
+    if (-not (Test-AuditHasProperty -Object $data -PropertyName 'Role').AssumeRolePolicyDocument) {
         return $null
     }
 
@@ -385,7 +389,7 @@ function Get-IamSsoInstances {
         return $null
     }
 
-    if ($data.Instances) {
+    if (Test-AuditHasProperty -Object $data -PropertyName 'Instances') {
         return @($data.Instances)
     }
 
@@ -415,8 +419,8 @@ function Get-IamPermissionSetDetails {
             return $null
         }
 
-        if ($listData.PermissionSets) {
-            foreach ($permissionSetArn in $listData.PermissionSets) {
+        if (Test-AuditHasProperty -Object $listData -PropertyName 'PermissionSets') {
+            foreach ($permissionSetArn in (Get-AuditCliArray $listData.$PermissionSets)) {
                 $describeData = Invoke-AWSCLI -Arguments @(
                     'sso-admin', 'describe-permission-set',
                     '--instance-arn', $InstanceArn,
@@ -430,7 +434,7 @@ function Get-IamPermissionSetDetails {
         }
 
         $token = $null
-        if ($listData.PSObject.Properties.Name -contains 'NextToken') {
+        if ((Test-AuditHasProperty -Object $listData -PropertyName 'NextToken')) {
             if (-not [string]::IsNullOrWhiteSpace([string]$listData.NextToken)) {
                 $token = [string]$listData.NextToken
             }
@@ -462,11 +466,11 @@ function Test-IamPermissionSetHasAdministratorAccess {
         return $null
     }
 
-    if (-not $data.AttachedManagedPolicies) {
+    if (-not (Test-AuditHasProperty -Object $data -PropertyName 'AttachedManagedPolicies')) {
         return $false
     }
 
-    foreach ($policy in $data.AttachedManagedPolicies) {
+    foreach ($policy in (Get-AuditCliArray $data.$AttachedManagedPolicies)) {
         if ([string]$policy.Name -eq 'AdministratorAccess') {
             return $true
         }
@@ -501,7 +505,7 @@ function Get-IamRolesAnywhereContext {
     return [PSCustomObject]@{
         TrustAnchors = $anchors
         Profiles     = $profiles
-        Detected     = (($anchors.Count -gt 0) -or ($profiles.Count -gt 0))
+        Detected     = (((Get-AuditCollectionCount $anchors) -gt 0) -or ((Get-AuditCollectionCount $profiles) -gt 0))
     }
 }
 
@@ -537,7 +541,7 @@ function Get-DomainChecks {
             }
 
             $mfaEnabled = $null
-            if ($summary.PSObject.Properties.Name -contains 'AccountMFAEnabled') {
+            if ((Test-AuditHasProperty -Object $summary -PropertyName 'AccountMFAEnabled')) {
                 $mfaEnabled = [int]$summary.AccountMFAEnabled
             }
 
@@ -560,7 +564,7 @@ function Get-DomainChecks {
             }
 
             $mfaEnabled = 0
-            if ($summary.PSObject.Properties.Name -contains 'AccountMFAEnabled') {
+            if ((Test-AuditHasProperty -Object $summary -PropertyName 'AccountMFAEnabled')) {
                 $mfaEnabled = [int]$summary.AccountMFAEnabled
             }
 
@@ -587,7 +591,7 @@ function Get-DomainChecks {
             }
 
             $keysPresent = 0
-            if ($summary.PSObject.Properties.Name -contains 'AccountAccessKeysPresent') {
+            if ((Test-AuditHasProperty -Object $summary -PropertyName 'AccountAccessKeysPresent')) {
                 $keysPresent = [int]$summary.AccountAccessKeysPresent
             }
 
@@ -633,14 +637,14 @@ function Get-DomainChecks {
                 $hasConsole = Test-IamUserHasConsoleAccess -Region $Region -UserName $userName
                 if ($hasConsole) {
                     $consoleUserCount++
-                    if ($consoleUsernames.Count -lt 5) {
+                    if ((Get-AuditCollectionCount $consoleUsernames) -lt 5) {
                         $consoleUsernames += $userName
                     }
                 }
             }
 
             $evidence = @{
-                iam_user_count       = $users.Count
+                iam_user_count       = (Get-AuditCollectionCount $users)
                 console_user_count   = $consoleUserCount
                 console_usernames    = @($consoleUsernames)
                 unclear_status_count = $unclearCount
@@ -652,7 +656,7 @@ function Get-DomainChecks {
                     -Status 'FAIL' -Evidence $evidence -Notes 'Local IAM users with console access exist'
             }
 
-            if ($users.Count -gt 0 -and $unclearCount -gt 0) {
+            if ((Get-AuditCollectionCount $users) -gt 0 -and $unclearCount -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-05' `
                     -Status 'PARTIAL' -Evidence $evidence -Notes 'Users exist but console access status unclear'
@@ -692,7 +696,7 @@ function Get-DomainChecks {
                 }
                 else {
                     $withoutMfaCount++
-                    if ($usersWithoutMfa.Count -lt 5) {
+                    if ((Get-AuditCollectionCount $usersWithoutMfa) -lt 5) {
                         $usersWithoutMfa += $userName
                     }
                 }
@@ -727,7 +731,7 @@ function Get-DomainChecks {
                 return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-07'
             }
 
-            if ($instances.Count -eq 0) {
+            if ((Get-AuditCollectionCount $instances) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-07' `
                     -Status 'PARTIAL' -Evidence @{ permission_set_count = 0 } `
@@ -747,18 +751,18 @@ function Get-DomainChecks {
                 foreach ($permissionSet in $permissionSets) {
                     $permissionSetCount++
                     $duration = 'PT1H'
-                    if ($permissionSet.SessionDuration) {
+                    if (Test-AuditHasProperty -Object $permissionSet -PropertyName 'SessionDuration') {
                         $duration = [string]$permissionSet.SessionDuration
                     }
 
-                    if (-not $durationBuckets.ContainsKey($duration)) {
+                    if (-not (Test-AuditHasProperty -Object $durationBuckets -PropertyName 'ContainsKey')($duration)) {
                         $durationBuckets[$duration] = 0
                     }
                     $durationBuckets[$duration] = $durationBuckets[$duration] + 1
 
                     $hours = Get-IamIsoDurationHours -Duration $duration
                     if ($hours -gt 8) {
-                        if ($longDurationSets.Count -lt 10) {
+                        if ((Get-AuditCollectionCount $longDurationSets) -lt 10) {
                             $longDurationSets += [string]$permissionSet.Name
                         }
                     }
@@ -771,7 +775,7 @@ function Get-DomainChecks {
                 long_duration_names  = @($longDurationSets)
             }
 
-            if ($longDurationSets.Count -gt 0) {
+            if ((Get-AuditCollectionCount $longDurationSets) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-07' `
                     -Status 'FAIL' -Evidence $evidence -Notes 'One or more permission sets exceed PT8H session duration'
@@ -802,18 +806,18 @@ function Get-DomainChecks {
             $genericNames = @()
             foreach ($user in $users) {
                 if (Test-IamGenericUserName -UserName ([string]$user.UserName)) {
-                    if ($genericNames.Count -lt 10) {
+                    if ((Get-AuditCollectionCount $genericNames) -lt 10) {
                         $genericNames += [string]$user.UserName
                     }
                 }
             }
 
             $evidence = @{
-                user_count    = $users.Count
+                user_count    = (Get-AuditCollectionCount $users)
                 generic_names = @($genericNames)
             }
 
-            if ($genericNames.Count -gt 0) {
+            if ((Get-AuditCollectionCount $genericNames) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-08' `
                     -Status 'FAIL' -Evidence $evidence -Notes 'Generic or shared IAM usernames found'
@@ -836,18 +840,18 @@ function Get-DomainChecks {
             }
 
             $instances = Get-IamSsoInstances -Region $Region
-            $identityCenterActive = ($null -ne $instances -and $instances.Count -gt 0)
+            $identityCenterActive = ($null -ne $instances -and (Get-AuditCollectionCount $instances) -gt 0)
 
             $activeKeyCount = 0
             foreach ($user in $users) {
                 $keys = Get-IamUserAccessKeySummary -Region $Region -UserName ([string]$user.UserName)
                 if ($null -eq $keys) { continue }
-                $activeKeyCount += $keys.Count
+                $activeKeyCount += (Get-AuditCollectionCount $keys)
             }
 
             $evidence = @{
                 identity_center_active = $identityCenterActive
-                iam_user_count         = $users.Count
+                iam_user_count         = (Get-AuditCollectionCount $users)
                 active_access_key_count = $activeKeyCount
             }
 
@@ -892,14 +896,14 @@ function Get-DomainChecks {
                 $hasAdmin = Test-IamRoleHasAdministratorAccess -Region $Region -RoleName $roleName
                 if ($hasAdmin -eq $true) {
                     $adminRoleCount++
-                    if ($adminRoles.Count -lt 10) {
+                    if ((Get-AuditCollectionCount $adminRoles) -lt 10) {
                         $adminRoles += $roleName
                     }
                 }
             }
 
             $evidence = @{
-                role_count               = $roles.Count
+                role_count               = (Get-AuditCollectionCount $roles)
                 administrator_role_count = $adminRoleCount
                 administrator_roles      = @($adminRoles)
             }
@@ -935,11 +939,11 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                administrator_role_count = $adminRoles.Count
+                administrator_role_count = (Get-AuditCollectionCount $adminRoles)
                 administrator_roles      = @($adminRoles)
             }
 
-            if ($adminRoles.Count -gt 0) {
+            if ((Get-AuditCollectionCount $adminRoles) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-12' `
                     -Status 'FAIL' -Evidence $evidence -Notes 'AdministratorAccess found on roles outside approved exception list'
@@ -988,20 +992,20 @@ function Get-DomainChecks {
                     $withBoundaryCount++
                 }
                 else {
-                    if ($withoutBoundary.Count -lt 10) {
+                    if ((Get-AuditCollectionCount $withoutBoundary) -lt 10) {
                         $withoutBoundary += $roleName
                     }
                 }
             }
 
             $evidence = @{
-                role_count              = $roles.Count
+                role_count              = (Get-AuditCollectionCount $roles)
                 delegated_role_count    = $delegatedCount
                 with_boundary_count     = $withBoundaryCount
                 without_boundary_roles  = @($withoutBoundary)
             }
 
-            if ($withoutBoundary.Count -gt 0) {
+            if ((Get-AuditCollectionCount $withoutBoundary) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-13' `
                     -Status 'FAIL' -Evidence $evidence -Notes 'Cross-account delegated roles without permission boundary found'
@@ -1059,7 +1063,7 @@ function Get-DomainChecks {
                     $withExternalIdCount++
                 }
                 else {
-                    if ($missingExternalId.Count -lt 10) {
+                    if ((Get-AuditCollectionCount $missingExternalId) -lt 10) {
                         $missingExternalId += $roleName
                     }
                 }
@@ -1077,7 +1081,7 @@ function Get-DomainChecks {
                     -Status 'PASS' -Evidence $evidence -Notes 'No cross-account roles found'
             }
 
-            if ($missingExternalId.Count -gt 0) {
+            if ((Get-AuditCollectionCount $missingExternalId) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-15' `
                     -Status 'FAIL' -Evidence $evidence -Notes 'Cross-account roles without ExternalId condition found'
@@ -1100,7 +1104,7 @@ function Get-DomainChecks {
             }
 
             $analyzers = @()
-            if ($data.analyzers) {
+            if (Test-AuditHasProperty -Object $data -PropertyName 'analyzers') {
                 $analyzers = @($data.analyzers)
             }
 
@@ -1121,18 +1125,18 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                analyzer_count         = $analyzers.Count
+                analyzer_count         = (Get-AuditCollectionCount $analyzers)
                 organization_analyzers = @($orgAnalyzers)
                 account_analyzers      = @($accountAnalyzers)
             }
 
-            if ($orgAnalyzers.Count -gt 0) {
+            if ((Get-AuditCollectionCount $orgAnalyzers) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-16' `
                     -Status 'PASS' -Evidence $evidence -Notes 'Organization-level IAM Access Analyzer is active'
             }
 
-            if ($accountAnalyzers.Count -gt 0) {
+            if ((Get-AuditCollectionCount $accountAnalyzers) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-16' `
                     -Status 'PARTIAL' -Evidence $evidence -Notes 'Account-level analyzer only'
@@ -1161,16 +1165,16 @@ function Get-DomainChecks {
                 $userName = [string]$user.UserName
                 $keys = Get-IamUserAccessKeySummary -Region $Region -UserName $userName
                 if ($null -eq $keys) { continue }
-                if ($keys.Count -gt 0) {
-                    $totalActiveKeys += $keys.Count
-                    if ($usersWithKeys.Count -lt 10) {
+                if ((Get-AuditCollectionCount $keys) -gt 0) {
+                    $totalActiveKeys += (Get-AuditCollectionCount $keys)
+                    if ((Get-AuditCollectionCount $usersWithKeys) -lt 10) {
                         $usersWithKeys += $userName
                     }
                 }
             }
 
             $evidence = @{
-                user_count           = $users.Count
+                user_count           = (Get-AuditCollectionCount $users)
                 active_key_count     = $totalActiveKeys
                 users_with_keys      = @($usersWithKeys)
             }
@@ -1209,7 +1213,7 @@ function Get-DomainChecks {
                     $createDate = [datetime]$key.CreateDate
                     $ageDays = ((Get-Date) - $createDate).Days
                     if ($ageDays -gt 90) {
-                        if ($staleKeys.Count -lt 10) {
+                        if ((Get-AuditCollectionCount $staleKeys) -lt 10) {
                             $staleKeys += @{
                                 access_key_id = [string]$key.AccessKeyId
                                 user_name     = [string]$user.UserName
@@ -1223,11 +1227,11 @@ function Get-DomainChecks {
 
             $evidence = @{
                 active_key_count = $activeKeyCount
-                stale_key_count  = $staleKeys.Count
+                stale_key_count  = (Get-AuditCollectionCount $staleKeys)
                 stale_keys       = @($staleKeys)
             }
 
-            if ($staleKeys.Count -gt 0) {
+            if ((Get-AuditCollectionCount $staleKeys) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-18' `
                     -Status 'FAIL' -Evidence $evidence -Notes 'Access keys older than 90 days found'
@@ -1265,7 +1269,7 @@ function Get-DomainChecks {
                 pipeline_admin_roles = @($pipelineAdminRoles)
             }
 
-            if ($pipelineAdminRoles.Count -gt 0) {
+            if ((Get-AuditCollectionCount $pipelineAdminRoles) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-19' `
                     -Status 'FAIL' -Evidence $evidence -Notes 'Pipeline roles with AdministratorAccess found'
@@ -1288,9 +1292,9 @@ function Get-DomainChecks {
             }
 
             $providers = @()
-            if ($data.OpenIDConnectProviderList) {
-                foreach ($provider in $data.OpenIDConnectProviderList) {
-                    if ($provider.Arn) {
+            if (Test-AuditHasProperty -Object $data -PropertyName 'OpenIDConnectProviderList') {
+                foreach ($provider in (Get-AuditCliArray $data.$OpenIDConnectProviderList)) {
+                    if (Test-AuditHasProperty -Object $provider -PropertyName 'Arn') {
                         $providers += [string]$provider.Arn
                     }
                 }
@@ -1298,7 +1302,7 @@ function Get-DomainChecks {
 
             $evidence = @{ oidc_provider_arns = @($providers) }
 
-            if ($providers.Count -gt 0) {
+            if ((Get-AuditCollectionCount $providers) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-20' `
                     -Status 'PASS' -Evidence $evidence -Notes 'OIDC provider configured for pipeline authentication'
@@ -1357,7 +1361,7 @@ function Get-DomainChecks {
 
             $matchingAlarms = @()
             if ($alarmData -and $alarmData.MetricAlarms) {
-                foreach ($alarm in $alarmData.MetricAlarms) {
+                foreach ($alarm in (Get-AuditCliArray $alarmData.$MetricAlarms)) {
                     $alarmName = [string]$alarm.AlarmName
                     $metricName = [string]$alarm.MetricName
                     if ($alarmName -match 'KMS|Key' -or $metricName -match 'ScheduleKeyDeletion|KMS') {
@@ -1368,7 +1372,7 @@ function Get-DomainChecks {
 
             $matchingRules = @()
             if ($rulesData -and $rulesData.Rules) {
-                foreach ($rule in $rulesData.Rules) {
+                foreach ($rule in (Get-AuditCliArray $rulesData.$Rules)) {
                     $ruleName = [string]$rule.Name
                     $eventPattern = [string]$rule.EventPattern
                     if ($ruleName -match 'KMS|Key' -or $eventPattern -match 'kms|ScheduleKeyDeletion') {
@@ -1382,7 +1386,7 @@ function Get-DomainChecks {
                 matching_rule_names  = @($matchingRules)
             }
 
-            if ($matchingAlarms.Count -gt 0 -or $matchingRules.Count -gt 0) {
+            if ((Get-AuditCollectionCount $matchingAlarms) -gt 0 -or (Get-AuditCollectionCount $matchingRules) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-25' `
                     -Status 'PASS' -Evidence $evidence -Notes 'Alerting on KMS key deletion events found'
@@ -1408,7 +1412,7 @@ function Get-DomainChecks {
             foreach ($user in $users) {
                 $userName = [string]$user.UserName
                 if ($userName -match 'external|contractor|vendor') {
-                    if ($contractorUsers.Count -lt 10) {
+                    if ((Get-AuditCollectionCount $contractorUsers) -lt 10) {
                         $contractorUsers += $userName
                     }
                 }
@@ -1418,7 +1422,7 @@ function Get-DomainChecks {
                 -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-26' `
                 -Status 'PARTIAL' `
                 -Evidence @{
-                    user_count         = $users.Count
+                    user_count         = (Get-AuditCollectionCount $users)
                     contractor_matches = @($contractorUsers)
                 } `
                 -Notes 'Verify contractor access managed via ITSM with end date. Check Management account access for no-end-date accounts.'
@@ -1440,21 +1444,21 @@ function Get-DomainChecks {
                 $userName = [string]$user.UserName
                 $hasConsole = Test-IamUserHasConsoleAccess -Region $Region -UserName $userName
                 $keys = Get-IamUserAccessKeySummary -Region $Region -UserName $userName
-                $hasKeys = ($null -ne $keys -and $keys.Count -gt 0)
+                $hasKeys = ($null -ne $keys -and (Get-AuditCollectionCount $keys) -gt 0)
 
                 if ($hasConsole -and $hasKeys) {
-                    if ($mixedIdentityUsers.Count -lt 10) {
+                    if ((Get-AuditCollectionCount $mixedIdentityUsers) -lt 10) {
                         $mixedIdentityUsers += $userName
                     }
                 }
             }
 
             $evidence = @{
-                mixed_identity_count = $mixedIdentityUsers.Count
+                mixed_identity_count = (Get-AuditCollectionCount $mixedIdentityUsers)
                 mixed_identity_users = @($mixedIdentityUsers)
             }
 
-            if ($mixedIdentityUsers.Count -gt 0) {
+            if ((Get-AuditCollectionCount $mixedIdentityUsers) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-27' `
                     -Status 'FAIL' -Evidence $evidence -Notes 'Users with both console and programmatic access found'
@@ -1472,7 +1476,7 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $context = Get-IamRolesAnywhereContext -Region $Region
-            if ($null -eq $context -or -not $context.Detected) {
+            if ($null -eq $context -or -not (Test-AuditHasProperty -Object $context -PropertyName 'Detected')) {
                 return New-IamRolesAnywhereNotDetectedResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-28'
             }
 
@@ -1488,7 +1492,7 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $context = Get-IamRolesAnywhereContext -Region $Region
-            if ($null -eq $context -or -not $context.Detected) {
+            if ($null -eq $context -or -not (Test-AuditHasProperty -Object $context -PropertyName 'Detected')) {
                 return New-IamRolesAnywhereNotDetectedResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-29'
             }
 
@@ -1496,8 +1500,8 @@ function Get-DomainChecks {
                 -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-29' `
                 -Status 'PARTIAL' `
                 -Evidence @{
-                    trust_anchor_count = $context.TrustAnchors.Count
-                    profile_count      = $context.Profiles.Count
+                    trust_anchor_count = (Get-AuditCollectionCount $context.TrustAnchors)
+                    profile_count      = (Get-AuditCollectionCount $context.Profiles)
                 } `
                 -Notes 'Verify external workloads using trust anchors are inventoried.'
         }
@@ -1509,7 +1513,7 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $context = Get-IamRolesAnywhereContext -Region $Region
-            if ($null -eq $context -or -not $context.Detected) {
+            if ($null -eq $context -or -not (Test-AuditHasProperty -Object $context -PropertyName 'Detected')) {
                 return New-IamRolesAnywhereNotDetectedResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-30'
             }
 
@@ -1525,7 +1529,7 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $context = Get-IamRolesAnywhereContext -Region $Region
-            if ($null -eq $context -or -not $context.Detected) {
+            if ($null -eq $context -or -not (Test-AuditHasProperty -Object $context -PropertyName 'Detected')) {
                 return New-IamRolesAnywhereNotDetectedResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-31'
             }
 
@@ -1533,9 +1537,9 @@ function Get-DomainChecks {
             $privateCaCount = 0
             $sourceTypes = @()
 
-            foreach ($anchor in $context.TrustAnchors) {
+            foreach ($anchor in (Get-AuditCliArray $context.$TrustAnchors)) {
                 $sourceType = [string]$anchor.SourceType
-                if ($sourceTypes.Count -lt 10) {
+                if ((Get-AuditCollectionCount $sourceTypes) -lt 10) {
                     $sourceTypes += $sourceType
                 }
                 if ($sourceType -eq 'AWS_ACM_PCA') {
@@ -1547,7 +1551,7 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                trust_anchor_count = $context.TrustAnchors.Count
+                trust_anchor_count = (Get-AuditCollectionCount $context.TrustAnchors)
                 private_ca_count   = $privateCaCount
                 public_ca_count    = $publicCaCount
                 source_types       = @($sourceTypes)
@@ -1571,34 +1575,34 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $context = Get-IamRolesAnywhereContext -Region $Region
-            if ($null -eq $context -or -not $context.Detected) {
+            if ($null -eq $context -or -not (Test-AuditHasProperty -Object $context -PropertyName 'Detected')) {
                 return New-IamRolesAnywhereNotDetectedResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-32'
             }
 
             $longLifetimeProfiles = @()
-            foreach ($profile in $context.Profiles) {
+            foreach ($profile in (Get-AuditCliArray $context.$Profiles)) {
                 $duration = 0
                 if ($profile.SessionPolicy -and $profile.DurationSeconds) {
                     $duration = [int]$profile.DurationSeconds
                 }
-                if ($profile.PSObject.Properties.Name -contains 'DurationSeconds') {
+                if ((Test-AuditHasProperty -Object $profile -PropertyName 'DurationSeconds')) {
                     $duration = [int]$profile.DurationSeconds
                 }
 
                 $days = [math]::Round(($duration / 86400), 2)
                 if ($days -gt 90) {
-                    if ($longLifetimeProfiles.Count -lt 10) {
+                    if ((Get-AuditCollectionCount $longLifetimeProfiles) -lt 10) {
                         $longLifetimeProfiles += [string]$profile.Name
                     }
                 }
             }
 
             $evidence = @{
-                profile_count            = $context.Profiles.Count
+                profile_count            = (Get-AuditCollectionCount $context.Profiles)
                 long_lifetime_profiles   = @($longLifetimeProfiles)
             }
 
-            if ($longLifetimeProfiles.Count -gt 0) {
+            if ((Get-AuditCollectionCount $longLifetimeProfiles) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-32' `
                     -Status 'FAIL' -Evidence $evidence -Notes 'Profile certificate lifetime exceeds 90 days'
@@ -1616,14 +1620,14 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $context = Get-IamRolesAnywhereContext -Region $Region
-            if ($null -eq $context -or -not $context.Detected) {
+            if ($null -eq $context -or -not (Test-AuditHasProperty -Object $context -PropertyName 'Detected')) {
                 return New-IamRolesAnywhereNotDetectedResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-33'
             }
 
             return New-AuditResult `
                 -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-33' `
                 -Status 'PARTIAL' `
-                -Evidence @{ trust_anchor_count = $context.TrustAnchors.Count } `
+                -Evidence @{ trust_anchor_count = (Get-AuditCollectionCount $context.TrustAnchors) } `
                 -Notes 'Verify CRL mechanism exists and propagates in under 10 minutes.'
         }
 
@@ -1634,14 +1638,14 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $context = Get-IamRolesAnywhereContext -Region $Region
-            if ($null -eq $context -or -not $context.Detected) {
+            if ($null -eq $context -or -not (Test-AuditHasProperty -Object $context -PropertyName 'Detected')) {
                 return New-IamRolesAnywhereNotDetectedResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-34'
             }
 
             return New-AuditResult `
                 -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-34' `
                 -Status 'PARTIAL' `
-                -Evidence @{ profile_count = $context.Profiles.Count } `
+                -Evidence @{ profile_count = (Get-AuditCollectionCount $context.Profiles) } `
                 -Notes 'Verify private key storage uses HSM or Secrets Manager. CCoE cannot enforce this.'
         }
 
@@ -1652,13 +1656,13 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $context = Get-IamRolesAnywhereContext -Region $Region
-            if ($null -eq $context -or -not $context.Detected) {
+            if ($null -eq $context -or -not (Test-AuditHasProperty -Object $context -PropertyName 'Detected')) {
                 return New-IamRolesAnywhereNotDetectedResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-35'
             }
 
             $roleIds = @()
             $sharedRoleCount = 0
-            foreach ($profile in $context.Profiles) {
+            foreach ($profile in (Get-AuditCliArray $context.$Profiles)) {
                 $roleArn = [string]$profile.RoleArn
                 if ([string]::IsNullOrWhiteSpace($roleArn)) { continue }
                 if ($roleIds -contains $roleArn) {
@@ -1670,8 +1674,8 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                profile_count     = $context.Profiles.Count
-                unique_role_count = $roleIds.Count
+                profile_count     = (Get-AuditCollectionCount $context.Profiles)
+                unique_role_count = (Get-AuditCollectionCount $roleIds)
                 shared_role_count = $sharedRoleCount
             }
 
@@ -1693,14 +1697,14 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $context = Get-IamRolesAnywhereContext -Region $Region
-            if ($null -eq $context -or -not $context.Detected) {
+            if ($null -eq $context -or -not (Test-AuditHasProperty -Object $context -PropertyName 'Detected')) {
                 return New-IamRolesAnywhereNotDetectedResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-36'
             }
 
             return New-AuditResult `
                 -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-36' `
                 -Status 'PARTIAL' `
-                -Evidence @{ profile_count = $context.Profiles.Count } `
+                -Evidence @{ profile_count = (Get-AuditCollectionCount $context.Profiles) } `
                 -Notes 'Workload role permissions at workload discretion. Spot-check via IAM role analysis.'
         }
 
@@ -1711,13 +1715,13 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $context = Get-IamRolesAnywhereContext -Region $Region
-            if ($null -eq $context -or -not $context.Detected) {
+            if ($null -eq $context -or -not (Test-AuditHasProperty -Object $context -PropertyName 'Detected')) {
                 return New-IamRolesAnywhereNotDetectedResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-37'
             }
 
             $profilesWithConditions = 0
             $profilesWithoutConditions = 0
-            foreach ($profile in $context.Profiles) {
+            foreach ($profile in (Get-AuditCliArray $context.$Profiles)) {
                 $policyText = [string]$profile.SessionPolicy
                 if ($policyText -match 'serialNumber|aws:SourceIp|IpAddress') {
                     $profilesWithConditions++
@@ -1728,7 +1732,7 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                profile_count                 = $context.Profiles.Count
+                profile_count                 = (Get-AuditCollectionCount $context.Profiles)
                 profiles_with_conditions      = $profilesWithConditions
                 profiles_without_conditions   = $profilesWithoutConditions
             }
@@ -1751,7 +1755,7 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $context = Get-IamRolesAnywhereContext -Region $Region
-            if ($null -eq $context -or -not $context.Detected) {
+            if ($null -eq $context -or -not (Test-AuditHasProperty -Object $context -PropertyName 'Detected')) {
                 return New-IamRolesAnywhereNotDetectedResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-38'
             }
 
@@ -1775,7 +1779,7 @@ function Get-DomainChecks {
 
             $recorderActive = $false
             if ($statusData -and $statusData.ConfigurationRecordersStatus) {
-                foreach ($status in $statusData.ConfigurationRecordersStatus) {
+                foreach ($status in (Get-AuditCliArray $statusData.$ConfigurationRecordersStatus)) {
                     if ($status.recording -eq $true) {
                         $recorderActive = $true
                         break
@@ -1785,7 +1789,7 @@ function Get-DomainChecks {
 
             $iamRules = @()
             if ($rulesData -and $rulesData.ConfigRules) {
-                foreach ($rule in $rulesData.ConfigRules) {
+                foreach ($rule in (Get-AuditCliArray $rulesData.$ConfigRules)) {
                     $ruleName = [string]$rule.ConfigRuleName
                     if ($ruleName -match 'IAM|iam') {
                         $iamRules += $ruleName
@@ -1795,11 +1799,11 @@ function Get-DomainChecks {
 
             $evidence = @{
                 recorder_active = $recorderActive
-                iam_rule_count  = $iamRules.Count
+                iam_rule_count  = (Get-AuditCollectionCount $iamRules)
                 iam_rule_names  = @($iamRules)
             }
 
-            if ($recorderActive -and $iamRules.Count -gt 0) {
+            if ($recorderActive -and (Get-AuditCollectionCount $iamRules) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-39' `
                     -Status 'PASS' -Evidence $evidence -Notes 'Config recorder active with IAM rules'
@@ -1834,7 +1838,7 @@ function Get-DomainChecks {
                 if ($roleName -match '^([^-/_]+)') {
                     $prefix = $Matches[1]
                 }
-                if (-not $prefixes.ContainsKey($prefix)) {
+                if (-not (Test-AuditHasProperty -Object $prefixes -PropertyName 'ContainsKey')($prefix)) {
                     $prefixes[$prefix] = 0
                 }
                 $prefixes[$prefix] = $prefixes[$prefix] + 1
@@ -1845,7 +1849,7 @@ function Get-DomainChecks {
                 -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-40' `
                 -Status 'PARTIAL' `
                 -Evidence @{
-                    sampled_role_count = $sampleNames.Count
+                    sampled_role_count = (Get-AuditCollectionCount $sampleNames)
                     sample_role_names  = @($sampleNames)
                     prefix_counts      = $prefixes
                 } `
@@ -1864,7 +1868,7 @@ function Get-DomainChecks {
             }
 
             $state = $null
-            if ($generateData.PSObject.Properties.Name -contains 'State') {
+            if ((Test-AuditHasProperty -Object $generateData -PropertyName 'State')) {
                 $state = [string]$generateData.State
             }
 
@@ -1925,17 +1929,17 @@ function Get-DomainChecks {
             }
 
             $instanceArn = $null
-            if ($instances.Count -gt 0) {
+            if ((Get-AuditCollectionCount $instances) -gt 0) {
                 $instanceArn = [string]$instances[0].InstanceArn
             }
 
             $evidence = @{
                 identity_center_instance_arn = $instanceArn
                 local_console_user_count     = $consoleUserCount
-                iam_user_count               = $users.Count
+                iam_user_count               = (Get-AuditCollectionCount $users)
             }
 
-            if ($instances.Count -gt 0 -and $consoleUserCount -eq 0) {
+            if ((Get-AuditCollectionCount $instances) -gt 0 -and $consoleUserCount -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-43' `
                     -Status 'PASS' -Evidence $evidence -Notes 'Identity Center active with no local IAM console users'
@@ -1959,7 +1963,7 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $instances = Get-IamSsoInstances -Region $Region
-            if ($null -eq $instances -or $instances.Count -eq 0) {
+            if ($null -eq $instances -or (Get-AuditCollectionCount $instances) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-44' `
                     -Status 'FAIL' -Evidence @{ instance_count = 0 } -Notes 'No Identity Center instance found'
@@ -1975,7 +1979,7 @@ function Get-DomainChecks {
 
             $externalApps = @()
             if ($appsData -and $appsData.Applications) {
-                foreach ($app in $appsData.Applications) {
+                foreach ($app in (Get-AuditCliArray $appsData.$Applications)) {
                     $providerArn = [string]$app.ApplicationProviderArn
                     if ($providerArn -and $providerArn -notmatch 'awsapps\.com') {
                         $externalApps += [string]$app.ApplicationArn
@@ -1991,11 +1995,11 @@ function Get-DomainChecks {
             $evidence = @{
                 instance_arn        = $instanceArn
                 identity_store_id   = $identityStoreId
-                external_app_count  = $externalApps.Count
+                external_app_count  = (Get-AuditCollectionCount $externalApps)
                 external_app_arns   = @($externalApps)
             }
 
-            if ($externalApps.Count -gt 0) {
+            if ((Get-AuditCollectionCount $externalApps) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-44' `
                     -Status 'PASS' -Evidence $evidence -Notes 'External IdP application configured'
@@ -2020,7 +2024,7 @@ function Get-DomainChecks {
             return New-AuditResult `
                 -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-45' `
                 -Status 'PARTIAL' `
-                -Evidence @{ identity_center_instance_count = $instances.Count } `
+                -Evidence @{ identity_center_instance_count = (Get-AuditCollectionCount $instances) } `
                 -Notes 'MFA enforcement configured in Guardian IdP upstream. Verify MFA=Required in Identity Center auth settings.'
         }
 
@@ -2043,7 +2047,7 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $instances = Get-IamSsoInstances -Region $Region
-            if ($null -eq $instances -or $instances.Count -eq 0) {
+            if ($null -eq $instances -or (Get-AuditCollectionCount $instances) -eq 0) {
                 return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-47'
             }
 
@@ -2054,7 +2058,7 @@ function Get-DomainChecks {
                 if ($null -eq $permissionSets) { continue }
                 foreach ($permissionSet in $permissionSets) {
                     $permissionSetCount++
-                    if ($sampleNames.Count -lt 10 -and $permissionSet.Name) {
+                    if ((Get-AuditCollectionCount $sampleNames) -lt 10 -and $permissionSet.Name) {
                         $sampleNames += [string]$permissionSet.Name
                     }
                 }
@@ -2077,7 +2081,7 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $instances = Get-IamSsoInstances -Region $Region
-            if ($null -eq $instances -or $instances.Count -eq 0) {
+            if ($null -eq $instances -or (Get-AuditCollectionCount $instances) -eq 0) {
                 return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-48'
             }
 
@@ -2088,7 +2092,7 @@ function Get-DomainChecks {
 
                 foreach ($permissionSet in $permissionSets) {
                     if (Test-IamPermissionSetHasAdministratorAccess -Region $Region -InstanceArn $instance.InstanceArn -PermissionSetArn $permissionSet.PermissionSetArn) {
-                        if ($adminPermissionSets.Count -lt 10) {
+                        if ((Get-AuditCollectionCount $adminPermissionSets) -lt 10) {
                             $adminPermissionSets += [string]$permissionSet.Name
                         }
                     }
@@ -2099,7 +2103,7 @@ function Get-DomainChecks {
                 administrator_permission_sets = @($adminPermissionSets)
             }
 
-            if ($adminPermissionSets.Count -gt 0) {
+            if ((Get-AuditCollectionCount $adminPermissionSets) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-48' `
                     -Status 'FAIL' -Evidence $evidence -Notes 'Permission Sets with AdministratorAccess found'
@@ -2126,7 +2130,7 @@ function Get-DomainChecks {
                 $permissionSets = Get-IamPermissionSetDetails -Region $Region -InstanceArn $instance.InstanceArn
                 if ($null -eq $permissionSets) { continue }
                 foreach ($permissionSet in $permissionSets) {
-                    if ($sampleNames.Count -lt 20 -and $permissionSet.Name) {
+                    if ((Get-AuditCollectionCount $sampleNames) -lt 20 -and $permissionSet.Name) {
                         $sampleNames += [string]$permissionSet.Name
                     }
                 }
@@ -2161,17 +2165,17 @@ function Get-DomainChecks {
                 foreach ($permissionSet in $permissionSets) {
                     $permissionSetCount++
                     $duration = 'PT1H'
-                    if ($permissionSet.SessionDuration) {
+                    if (Test-AuditHasProperty -Object $permissionSet -PropertyName 'SessionDuration') {
                         $duration = [string]$permissionSet.SessionDuration
                     }
 
-                    if (-not $durationBuckets.ContainsKey($duration)) {
+                    if (-not (Test-AuditHasProperty -Object $durationBuckets -PropertyName 'ContainsKey')($duration)) {
                         $durationBuckets[$duration] = 0
                     }
                     $durationBuckets[$duration] = $durationBuckets[$duration] + 1
 
                     if ((Get-IamIsoDurationHours -Duration $duration) -gt 8) {
-                        if ($longDurationSets.Count -lt 10) {
+                        if ((Get-AuditCollectionCount $longDurationSets) -lt 10) {
                             $longDurationSets += [string]$permissionSet.Name
                         }
                     }
@@ -2184,7 +2188,7 @@ function Get-DomainChecks {
                 long_duration_names  = @($longDurationSets)
             }
 
-            if ($longDurationSets.Count -gt 0) {
+            if ((Get-AuditCollectionCount $longDurationSets) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-50' `
                     -Status 'FAIL' -Evidence $evidence -Notes 'Permission Sets exceed PT8H session duration'
@@ -2250,8 +2254,8 @@ function Get-DomainChecks {
             }
 
             $eventCount = 0
-            if ($data.Events) {
-                $eventCount = @($data.Events).Count
+            if (Test-AuditHasProperty -Object $data -PropertyName 'Events') {
+                $eventCount = (Get-AuditCollectionCount $data.Events)
             }
 
             $evidence = @{ sso_event_count_last_7_days = $eventCount }
@@ -2279,8 +2283,8 @@ function Get-DomainChecks {
             }
 
             $ssoRules = @()
-            if ($rulesData.Rules) {
-                foreach ($rule in $rulesData.Rules) {
+            if (Test-AuditHasProperty -Object $rulesData -PropertyName 'Rules') {
+                foreach ($rule in (Get-AuditCliArray $rulesData.$Rules)) {
                     $ruleName = [string]$rule.Name
                     $eventPattern = [string]$rule.EventPattern
                     if ($eventPattern -match 'sso\.amazonaws\.com|CreateUser|PutInlinePolicyToPermissionSet' -or $ruleName -match 'SSO|IdentityCenter|IAM') {
@@ -2291,7 +2295,7 @@ function Get-DomainChecks {
 
             $evidence = @{ sso_rule_names = @($ssoRules) }
 
-            if ($ssoRules.Count -gt 0) {
+            if ((Get-AuditCollectionCount $ssoRules) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-55' `
                     -Status 'PASS' -Evidence $evidence -Notes 'EventBridge rules exist on critical IAM or SSO events'

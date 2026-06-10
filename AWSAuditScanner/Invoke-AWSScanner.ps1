@@ -63,6 +63,142 @@ function Get-SafeErrorMessage {
     return $Fallback
 }
 
+function Get-AuditCliArray {
+    param(
+        $Items
+    )
+
+    if ($null -eq $Items) {
+        return @()
+    }
+
+    if ($Items -is [string]) {
+        return ,$Items
+    }
+
+    if ($Items -is [System.Array]) {
+        return $Items
+    }
+
+    if ($Items.GetType().FullName -eq 'System.Management.Automation.PSCustomObject') {
+        return ,$Items
+    }
+
+    if ($Items -is [System.Collections.ICollection]) {
+        if ($Items.Count -eq 0) {
+            return @()
+        }
+
+        $result = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($item in $Items) {
+            [void]$result.Add($item)
+        }
+        return $result.ToArray()
+    }
+
+    return ,$Items
+}
+
+function Test-AuditHasProperty {
+    param(
+        $Object,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PropertyName
+    )
+
+    if ($null -eq $Object) {
+        return $false
+    }
+
+    if ($Object -is [System.Collections.IDictionary]) {
+        foreach ($key in $Object.Keys) {
+            if ([string]$key -ieq $PropertyName) {
+                return $true
+            }
+        }
+        return $false
+    }
+
+    foreach ($name in $Object.PSObject.Properties.Name) {
+        if ($name -ieq $PropertyName) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function New-AuditList {
+    return New-Object 'System.Collections.Generic.List[object]'
+}
+
+function Get-AuditCollectionCount {
+    param(
+        $Items
+    )
+
+    if ($null -eq $Items) {
+        return 0
+    }
+
+    if ($Items -is [string]) {
+        return 1
+    }
+
+    if ($Items -is [System.Collections.ICollection]) {
+        return $Items.Count
+    }
+
+    if ($Items.GetType().FullName -eq 'System.Management.Automation.PSCustomObject') {
+        return 1
+    }
+
+    if ($Items -is [System.Collections.IEnumerable]) {
+        $count = 0
+        foreach ($item in $Items) {
+            $count++
+        }
+        return $count
+    }
+
+    return 1
+}
+
+function Get-AuditPropertyValue {
+    param(
+        $Object,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$PropertyNames
+    )
+
+    if ($null -eq $Object) {
+        return $null
+    }
+
+    if ($Object -is [System.Collections.IDictionary]) {
+        foreach ($propertyName in $PropertyNames) {
+            foreach ($key in $Object.Keys) {
+                if ([string]$key -ieq $propertyName) {
+                    return $Object[$key]
+                }
+            }
+        }
+        return $null
+    }
+
+    foreach ($propertyName in $PropertyNames) {
+        foreach ($prop in $Object.PSObject.Properties) {
+            if ($prop.Name -ieq $propertyName) {
+                return $prop.Value
+            }
+        }
+    }
+
+    return $null
+}
+
 function Write-AuditLog {
     param(
         [Parameter(Mandatory = $true)]

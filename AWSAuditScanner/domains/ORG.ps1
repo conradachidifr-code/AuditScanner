@@ -28,7 +28,7 @@ function Get-OrgScpSummaries {
         return $null
     }
 
-    if ($data.Policies) {
+    if (Test-AuditHasProperty -Object $data -PropertyName 'Policies') {
         return @($data.Policies)
     }
 
@@ -49,11 +49,11 @@ function Get-OrgPolicyDocumentText {
         return $null
     }
 
-    if (-not $data.Policy) {
+    if (-not (Test-AuditHasProperty -Object $data -PropertyName 'Policy')) {
         return $null
     }
 
-    if (-not $data.Policy.Content) {
+    if (-not (Test-AuditHasProperty -Object $data -PropertyName 'Policy').Content) {
         return $null
     }
 
@@ -75,7 +75,7 @@ function Get-OrgScpDocuments {
     $unreadableCount = 0
 
     foreach ($scp in $scps) {
-        if (-not $scp.Id) {
+        if (-not (Test-AuditHasProperty -Object $scp -PropertyName 'Id')) {
             continue
         }
 
@@ -100,7 +100,7 @@ function Get-OrgScpDocuments {
     }
 
     return [PSCustomObject]@{
-        ScpCount         = $scps.Count
+        ScpCount         = (Get-AuditCollectionCount $scps)
         Documents        = @($documents)
         UnreadableCount  = $unreadableCount
     }
@@ -145,7 +145,7 @@ function Get-OrgIamRoles {
         [string]$Region
     )
 
-    $roles = @()
+    $roles = New-AuditList
     $marker = $null
 
     do {
@@ -159,12 +159,14 @@ function Get-OrgIamRoles {
             return $null
         }
 
-        if ($data.Roles) {
-            $roles += @($data.Roles)
+        if (Test-AuditHasProperty -Object $data -PropertyName 'Roles') {
+            foreach ($role in (Get-AuditCliArray $data.Roles)) {
+                [void]$roles.Add($role)
+            }
         }
 
         $marker = $null
-        if ($data.PSObject.Properties.Name -contains 'Marker') {
+        if ((Test-AuditHasProperty -Object $data -PropertyName 'Marker')) {
             if (-not [string]::IsNullOrWhiteSpace([string]$data.Marker)) {
                 if ($data.IsTruncated -eq $true) {
                     $marker = [string]$data.Marker
@@ -173,7 +175,7 @@ function Get-OrgIamRoles {
         }
     } while ($marker)
 
-    return $roles
+    return $roles.ToArray()
 }
 
 function Test-OrgRoleAttachedPolicyMatch {
@@ -193,11 +195,11 @@ function Test-OrgRoleAttachedPolicyMatch {
         return $false
     }
 
-    if (-not $data.AttachedPolicies) {
+    if (-not (Test-AuditHasProperty -Object $data -PropertyName 'AttachedPolicies')) {
         return $false
     }
 
-    foreach ($policy in $data.AttachedPolicies) {
+    foreach ($policy in (Get-AuditCliArray $data.$AttachedPolicies)) {
         $policyName = [string]$policy.PolicyName
         $policyArn = [string]$policy.PolicyArn
 
@@ -247,8 +249,8 @@ function Get-DomainChecks {
             $denyStatementCount = 0
             $matchingPolicyNames = @()
 
-            foreach ($document in $scpData.Documents) {
-                if (-not $document.IsReadable) {
+            foreach ($document in (Get-AuditCliArray $scpData.$Documents)) {
+                if (-not (Test-AuditHasProperty -Object $document -PropertyName 'IsReadable')) {
                     continue
                 }
 
@@ -260,7 +262,7 @@ function Get-DomainChecks {
 
                 if ($hasDeny -and ($coversGuardDuty -or $coversCloudTrail -or $coversConfig)) {
                     $denyStatementCount++
-                    if ($document.Name) {
+                    if (Test-AuditHasProperty -Object $document -PropertyName 'Name') {
                         $matchingPolicyNames += [string]$document.Name
                     }
                 }
@@ -324,8 +326,8 @@ function Get-DomainChecks {
 
             $denyActionsFound = @()
 
-            foreach ($document in $scpData.Documents) {
-                if (-not $document.IsReadable) {
+            foreach ($document in (Get-AuditCliArray $scpData.$Documents)) {
+                if (-not (Test-AuditHasProperty -Object $document -PropertyName 'IsReadable')) {
                     continue
                 }
 
@@ -413,8 +415,8 @@ function Get-DomainChecks {
             $matchedPolicyNames = @()
             $regionValues = @()
 
-            foreach ($document in $scpData.Documents) {
-                if (-not $document.IsReadable) {
+            foreach ($document in (Get-AuditCliArray $scpData.$Documents)) {
+                if (-not (Test-AuditHasProperty -Object $document -PropertyName 'IsReadable')) {
                     continue
                 }
 
@@ -423,7 +425,7 @@ function Get-DomainChecks {
                     continue
                 }
 
-                if ($document.Name) {
+                if (Test-AuditHasProperty -Object $document -PropertyName 'Name') {
                     $matchedPolicyNames += [string]$document.Name
                 }
 
@@ -442,7 +444,7 @@ function Get-DomainChecks {
                 regions_referenced = @($regionValues)
             }
 
-            if ($matchedPolicyNames.Count -gt 0) {
+            if ((Get-AuditCollectionCount $matchedPolicyNames) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId `
                     -AccountName $AccountName `
@@ -512,7 +514,7 @@ function Get-DomainChecks {
 
             $guardDutyAdminAccounts = @()
             if ($guardDutyData -and $guardDutyData.AdminAccounts) {
-                foreach ($adminAccount in $guardDutyData.AdminAccounts) {
+                foreach ($adminAccount in (Get-AuditCliArray $guardDutyData.$AdminAccounts)) {
                     $guardDutyAdminAccounts += @{
                         account_id   = [string]$adminAccount.AccountId
                         admin_status = [string]$adminAccount.AdminStatus
@@ -522,7 +524,7 @@ function Get-DomainChecks {
 
             $delegatedAdmins = @()
             if ($delegatedData -and $delegatedData.DelegatedAdministrators) {
-                foreach ($delegatedAdmin in $delegatedData.DelegatedAdministrators) {
+                foreach ($delegatedAdmin in (Get-AuditCliArray $delegatedData.$DelegatedAdministrators)) {
                     $delegatedAdmins += @{
                         account_id         = [string]$delegatedAdmin.Id
                         service_principals = @($delegatedAdmin.ServicePrincipal)
@@ -530,10 +532,10 @@ function Get-DomainChecks {
                 }
             }
 
-            $guardDutyDelegated = ($guardDutyAdminAccounts.Count -gt 0)
-            if (-not $guardDutyDelegated -and $delegatedAdmins.Count -gt 0) {
+            $guardDutyDelegated = ((Get-AuditCollectionCount $guardDutyAdminAccounts) -gt 0)
+            if (-not $guardDutyDelegated -and (Get-AuditCollectionCount $delegatedAdmins) -gt 0) {
                 foreach ($delegatedAdmin in $delegatedAdmins) {
-                    foreach ($principal in $delegatedAdmin.service_principals) {
+                    foreach ($principal in (Get-AuditCliArray $delegatedAdmin.$service_principals)) {
                         if ($principal -like '*guardduty*') {
                             $guardDutyDelegated = $true
                             break
@@ -622,16 +624,16 @@ function Get-DomainChecks {
             }
 
             $budgets = @()
-            if ($data.Budgets) {
+            if (Test-AuditHasProperty -Object $data -PropertyName 'Budgets') {
                 $budgets = @($data.Budgets)
             }
 
             $budgetsWithAlerts = @()
             foreach ($budget in $budgets) {
                 $alertThresholds = @()
-                if ($budget.NotificationsWithSubscribers) {
-                    foreach ($notification in $budget.NotificationsWithSubscribers) {
-                        if ($notification.Notification) {
+                if (Test-AuditHasProperty -Object $budget -PropertyName 'NotificationsWithSubscribers') {
+                    foreach ($notification in (Get-AuditCliArray $budget.$NotificationsWithSubscribers)) {
+                        if (Test-AuditHasProperty -Object $notification -PropertyName 'Notification') {
                             if ($notification.Notification.Threshold) {
                                 $alertThresholds += [string]$notification.Notification.Threshold
                             }
@@ -639,7 +641,7 @@ function Get-DomainChecks {
                     }
                 }
 
-                if ($alertThresholds.Count -gt 0) {
+                if ((Get-AuditCollectionCount $alertThresholds) -gt 0) {
                     $budgetName = [string]$budget.BudgetName
                     $budgetsWithAlerts += @{
                         budget_name       = $budgetName
@@ -649,12 +651,12 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                budget_count             = $budgets.Count
+                budget_count             = (Get-AuditCollectionCount $budgets)
                 budgets_with_alerts      = @($budgetsWithAlerts)
-                budgets_with_alert_count = $budgetsWithAlerts.Count
+                budgets_with_alert_count = (Get-AuditCollectionCount $budgetsWithAlerts)
             }
 
-            if ($budgetsWithAlerts.Count -gt 0) {
+            if ((Get-AuditCollectionCount $budgetsWithAlerts) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId `
                     -AccountName $AccountName `
@@ -743,11 +745,11 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                matching_role_count = $matchingRoles.Count
+                matching_role_count = (Get-AuditCollectionCount $matchingRoles)
                 roles               = @($matchingRoles)
             }
 
-            if ($matchingRoles.Count -gt 0) {
+            if ((Get-AuditCollectionCount $matchingRoles) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId `
                     -AccountName $AccountName `
@@ -803,7 +805,7 @@ function Get-DomainChecks {
                 -ControlId 'ORG-15' `
                 -Status 'PARTIAL' `
                 -Evidence @{
-                    break_glass_role_count = $breakGlassRoles.Count
+                    break_glass_role_count = (Get-AuditCollectionCount $breakGlassRoles)
                     roles                  = @($breakGlassRoles)
                 } `
                 -Notes 'Verify break-glass procedure exists with activation log, RSSI notification.'
@@ -827,8 +829,8 @@ function Get-DomainChecks {
             }
 
             $policyNames = @()
-            foreach ($document in $scpData.Documents) {
-                if ($document.Name) {
+            foreach ($document in (Get-AuditCliArray $scpData.$Documents)) {
+                if (Test-AuditHasProperty -Object $document -PropertyName 'Name') {
                     $policyNames += [string]$document.Name
                 }
             }

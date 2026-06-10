@@ -30,139 +30,35 @@ $DomainSeverity = @{
 $Script:NetAnyCidr = '0.0.0.0/0'
 
 function Get-NetCliArray {
-    param(
-        $Items
-    )
-
-    if ($null -eq $Items) {
-        return @()
-    }
-
-    if ($Items -is [string]) {
-        return ,$Items
-    }
-
-    if ($Items -is [System.Array]) {
-        return $Items
-    }
-
-    if ($Items.GetType().FullName -eq 'System.Management.Automation.PSCustomObject') {
-        return ,$Items
-    }
-
-    if ($Items -is [System.Collections.ICollection]) {
-        if ($Items.Count -eq 0) {
-            return @()
-        }
-
-        $result = New-Object 'System.Collections.Generic.List[object]'
-        foreach ($item in $Items) {
-            [void]$result.Add($item)
-        }
-        return $result.ToArray()
-    }
-
-    return ,$Items
+    param($Items)
+    return (Get-AuditCliArray $Items)
 }
 
 function Test-NetHasProperty {
     param(
         $Object,
-
         [Parameter(Mandatory = $true)]
         [string]$PropertyName
     )
-
-    if ($null -eq $Object) {
-        return $false
-    }
-
-    if ($Object -is [System.Collections.IDictionary]) {
-        foreach ($key in $Object.Keys) {
-            if ([string]$key -ieq $PropertyName) {
-                return $true
-            }
-        }
-        return $false
-    }
-
-    foreach ($name in $Object.PSObject.Properties.Name) {
-        if ($name -ieq $PropertyName) {
-            return $true
-        }
-    }
-
-    return $false
+    return (Test-AuditHasProperty -Object $Object -PropertyName $PropertyName)
 }
 
 function New-NetList {
-    return New-Object 'System.Collections.Generic.List[object]'
+    return (New-AuditList)
 }
 
 function Get-NetCollectionCount {
-    param(
-        $Items
-    )
-
-    if ($null -eq $Items) {
-        return 0
-    }
-
-    if ($Items -is [string]) {
-        return 1
-    }
-
-    if ($Items -is [System.Collections.ICollection]) {
-        return $Items.Count
-    }
-
-    if ($Items.GetType().FullName -eq 'System.Management.Automation.PSCustomObject') {
-        return 1
-    }
-
-    if ($Items -is [System.Collections.IEnumerable]) {
-        $count = 0
-        foreach ($item in $Items) {
-            $count++
-        }
-        return $count
-    }
-
-    return 1
+    param($Items)
+    return (Get-AuditCollectionCount $Items)
 }
 
 function Get-NetPropertyValue {
     param(
         $Object,
-
         [Parameter(Mandatory = $true)]
         [string[]]$PropertyNames
     )
-
-    if ($null -eq $Object) {
-        return $null
-    }
-
-    if ($Object -is [System.Collections.IDictionary]) {
-        foreach ($propertyName in $PropertyNames) {
-            foreach ($key in $Object.Keys) {
-                if ([string]$key -ieq $propertyName) {
-                    return $Object[$key]
-                }
-            }
-        }
-        return $null
-    }
-
-    foreach ($propertyName in $PropertyNames) {
-        foreach ($prop in $Object.PSObject.Properties) {
-            if ($prop.Name -ieq $propertyName) {
-                return $prop.Value
-            }
-        }
-    }
-
-    return $null
+    return (Get-AuditPropertyValue -Object $Object -PropertyNames $PropertyNames)
 }
 
 function Get-NetRouteTables {
@@ -458,10 +354,10 @@ function Get-DomainChecks {
             }
 
             $vpcStats = @{}
-            foreach ($subnetId in $subnetMap.Keys) {
+            foreach ($subnetId in (Get-AuditCliArray $subnetMap.$Keys)) {
                 $entry = $subnetMap[$subnetId]
                 $vpcId = $entry.vpc_id
-                if (-not $vpcStats.ContainsKey($vpcId)) {
+                if (-not (Test-AuditHasProperty -Object $vpcStats -PropertyName 'ContainsKey')($vpcId)) {
                     $vpcStats[$vpcId] = @{
                         public_count  = 0
                         private_count = 0
@@ -637,7 +533,7 @@ function Get-DomainChecks {
             }
 
             $privateVpcIds = @{}
-            foreach ($subnetId in $subnetMap.Keys) {
+            foreach ($subnetId in (Get-AuditCliArray $subnetMap.$Keys)) {
                 if (-not $subnetMap[$subnetId].is_public) {
                     $privateVpcIds[$subnetMap[$subnetId].vpc_id] = $true
                 }

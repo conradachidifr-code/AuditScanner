@@ -27,7 +27,7 @@ function Get-BckBackupPlans {
         [string]$Region
     )
 
-    $plans = @()
+    $plans = New-AuditList
     $token = $null
 
     do {
@@ -41,19 +41,21 @@ function Get-BckBackupPlans {
             return $null
         }
 
-        if ($data.BackupPlansList) {
-            $plans += @($data.BackupPlansList)
+        if (Test-AuditHasProperty -Object $data -PropertyName 'BackupPlansList') {
+            foreach ($plan in (Get-AuditCliArray $data.BackupPlansList)) {
+                [void]$plans.Add($plan)
+            }
         }
 
         $token = $null
-        if ($data.PSObject.Properties.Name -contains 'NextToken') {
+        if ((Test-AuditHasProperty -Object $data -PropertyName 'NextToken')) {
             if (-not [string]::IsNullOrWhiteSpace([string]$data.NextToken)) {
                 $token = [string]$data.NextToken
             }
         }
     } while ($token)
 
-    return $plans
+    return $plans.ToArray()
 }
 
 function Get-BckBackupPlanDetails {
@@ -83,12 +85,12 @@ function Get-BckSelectionResourceTypes {
     }
 
     $resourceTypes = @()
-    if (-not $listData.BackupSelectionsList) {
+    if (-not (Test-AuditHasProperty -Object $listData -PropertyName 'BackupSelectionsList')) {
         return @()
     }
 
-    foreach ($selection in $listData.BackupSelectionsList) {
-        if (-not $selection.SelectionId) {
+    foreach ($selection in (Get-AuditCliArray $listData.$BackupSelectionsList)) {
+        if (-not (Test-AuditHasProperty -Object $selection -PropertyName 'SelectionId')) {
             continue
         }
 
@@ -177,9 +179,9 @@ function Get-BckS3BucketNames {
     }
 
     $bucketNames = @()
-    if ($data.Buckets) {
-        foreach ($bucket in $data.Buckets) {
-            if ($bucket.Name) {
+    if (Test-AuditHasProperty -Object $data -PropertyName 'Buckets') {
+        foreach ($bucket in (Get-AuditCliArray $data.$Buckets)) {
+            if (Test-AuditHasProperty -Object $bucket -PropertyName 'Name') {
                 $bucketNames += [string]$bucket.Name
             }
         }
@@ -219,7 +221,7 @@ function Get-DomainChecks {
                 return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'BCK-02'
             }
 
-            if ($plans.Count -eq 0) {
+            if ((Get-AuditCollectionCount $plans) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'BCK-02' `
                     -Status 'FAIL' -Evidence @{ plan_count = 0 } -Notes 'No backup plans found'
@@ -248,7 +250,7 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                plan_count      = $plans.Count
+                plan_count      = (Get-AuditCollectionCount $plans)
                 plans           = @($planEvidence)
                 covered_types   = @($coveredTypes)
             }
@@ -277,7 +279,7 @@ function Get-DomainChecks {
                 return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'BCK-03'
             }
 
-            if ($plans.Count -eq 0) {
+            if ((Get-AuditCollectionCount $plans) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'BCK-03' `
                     -Status 'FAIL' -Evidence @{ plan_count = 0 } -Notes 'No backup plans found'
@@ -292,7 +294,7 @@ function Get-DomainChecks {
                     continue
                 }
 
-                if (-not $planDetails.BackupPlan -or -not $planDetails.BackupPlan.Rules) {
+                if (-not (Test-AuditHasProperty -Object $planDetails -PropertyName 'BackupPlan') -or -not (Test-AuditHasProperty -Object $planDetails -PropertyName 'BackupPlan').Rules) {
                     continue
                 }
 
@@ -311,12 +313,12 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                schedule_count    = $schedules.Count
+                schedule_count    = (Get-AuditCollectionCount $schedules)
                 infrequent_count  = $infrequentCount
                 schedules         = @($schedules)
             }
 
-            if ($schedules.Count -eq 0) {
+            if ((Get-AuditCollectionCount $schedules) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'BCK-03' `
                     -Status 'FAIL' -Evidence $evidence -Notes 'No backup rules found'
@@ -342,11 +344,11 @@ function Get-DomainChecks {
             }
 
             $vaults = @()
-            if ($data.BackupVaultList) {
+            if (Test-AuditHasProperty -Object $data -PropertyName 'BackupVaultList') {
                 $vaults = @($data.BackupVaultList)
             }
 
-            if ($vaults.Count -eq 0) {
+            if ((Get-AuditCollectionCount $vaults) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'BCK-04' `
                     -Status 'FAIL' -Evidence @{ vault_count = 0 } -Notes 'No backup vaults found'
@@ -372,7 +374,7 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                vault_count          = $vaults.Count
+                vault_count          = (Get-AuditCollectionCount $vaults)
                 cross_account_count  = $crossAccountCount
                 vaults               = @($vaultEvidence)
             }
@@ -396,7 +398,7 @@ function Get-DomainChecks {
                 return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'BCK-05'
             }
 
-            if (-not $listData.BackupVaultList -or $listData.BackupVaultList.Count -eq 0) {
+            if (-not (Test-AuditHasProperty -Object $listData -PropertyName 'BackupVaultList') -or (Get-AuditCollectionCount $listData.BackupVaultList) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'BCK-05' `
                     -Status 'FAIL' -Evidence @{ vault_count = 0 } -Notes 'No backup vaults found'
@@ -405,7 +407,7 @@ function Get-DomainChecks {
             $vaultEvidence = @()
             $failingVaults = 0
 
-            foreach ($vault in $listData.BackupVaultList) {
+            foreach ($vault in (Get-AuditCliArray $listData.$BackupVaultList)) {
                 $vaultName = [string]$vault.BackupVaultName
                 $detailData = Invoke-AWSCLI -Arguments @('backup', 'describe-backup-vault', '--backup-vault-name', $vaultName) -Region $Region
                 if ($null -eq $detailData) {
@@ -414,7 +416,7 @@ function Get-DomainChecks {
                 }
 
                 $encryptionKeyArn = $null
-                if ($detailData.EncryptionKeyArn) {
+                if (Test-AuditHasProperty -Object $detailData -PropertyName 'EncryptionKeyArn') {
                     $encryptionKeyArn = [string]$detailData.EncryptionKeyArn
                 }
 
@@ -437,7 +439,7 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                vault_count    = @($listData.BackupVaultList).Count
+                vault_count    = (Get-AuditCollectionCount $listData.BackupVaultList)
                 vaults         = @($vaultEvidence)
                 failing_vaults = $failingVaults
             }
@@ -461,7 +463,7 @@ function Get-DomainChecks {
                 return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'BCK-06'
             }
 
-            if (-not $listData.BackupVaultList -or $listData.BackupVaultList.Count -eq 0) {
+            if (-not (Test-AuditHasProperty -Object $listData -PropertyName 'BackupVaultList') -or (Get-AuditCollectionCount $listData.BackupVaultList) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'BCK-06' `
                     -Status 'FAIL' -Evidence @{ vault_count = 0 } -Notes 'No backup vaults found'
@@ -470,7 +472,7 @@ function Get-DomainChecks {
             $vaultEvidence = @()
             $failingVaults = 0
 
-            foreach ($vault in $listData.BackupVaultList) {
+            foreach ($vault in (Get-AuditCliArray $listData.$BackupVaultList)) {
                 $vaultName = [string]$vault.BackupVaultName
                 $policyData = Invoke-AWSCLI -Arguments @('backup', 'get-backup-vault-access-policy', '--backup-vault-name', $vaultName) -Region $Region
 
@@ -501,7 +503,7 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                vault_count    = @($listData.BackupVaultList).Count
+                vault_count    = (Get-AuditCollectionCount $listData.BackupVaultList)
                 vaults         = @($vaultEvidence)
                 failing_vaults = $failingVaults
             }
@@ -528,8 +530,8 @@ function Get-DomainChecks {
             $copyJobs = @()
             $crossRegionCount = 0
 
-            if ($data.CopyJobs) {
-                foreach ($job in $data.CopyJobs) {
+            if (Test-AuditHasProperty -Object $data -PropertyName 'CopyJobs') {
+                foreach ($job in (Get-AuditCliArray $data.$CopyJobs)) {
                     $destinationArn = [string]$job.DestinationBackupVaultArn
                     $destinationRegion = $null
                     if ($destinationArn -match 'arn:aws:backup:([^:]+):') {
@@ -551,7 +553,7 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                copy_job_count      = $copyJobs.Count
+                copy_job_count      = (Get-AuditCollectionCount $copyJobs)
                 cross_region_count  = $crossRegionCount
                 copy_jobs           = @($copyJobs)
             }
@@ -576,11 +578,11 @@ function Get-DomainChecks {
             }
 
             $instances = @()
-            if ($data.DBInstances) {
+            if (Test-AuditHasProperty -Object $data -PropertyName 'DBInstances') {
                 $instances = @($data.DBInstances)
             }
 
-            if ($instances.Count -eq 0) {
+            if ((Get-AuditCollectionCount $instances) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'BCK-08' `
                     -Status 'PARTIAL' -Evidence @{ instance_count = 0 } -Notes 'No RDS instances found in region'
@@ -591,7 +593,7 @@ function Get-DomainChecks {
 
             foreach ($instance in $instances) {
                 $retention = 0
-                if ($instance.PSObject.Properties.Name -contains 'BackupRetentionPeriod') {
+                if ((Test-AuditHasProperty -Object $instance -PropertyName 'BackupRetentionPeriod')) {
                     $retention = [int]$instance.BackupRetentionPeriod
                 }
 
@@ -601,19 +603,19 @@ function Get-DomainChecks {
                 }
 
                 if ($retention -lt 7) {
-                    if ($failingInstances.Count -lt 10) {
+                    if ((Get-AuditCollectionCount $failingInstances) -lt 10) {
                         $failingInstances += [string]$instance.DBInstanceIdentifier
                     }
                 }
             }
 
             $evidence = @{
-                instance_count      = $instances.Count
+                instance_count      = (Get-AuditCollectionCount $instances)
                 instances           = @($instanceEvidence)
                 failing_instances   = @($failingInstances)
             }
 
-            if ($failingInstances.Count -gt 0) {
+            if ((Get-AuditCollectionCount $failingInstances) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'BCK-08' `
                     -Status 'FAIL' -Evidence $evidence -Notes 'One or more RDS instances have BackupRetentionPeriod below 7 days'
@@ -639,12 +641,12 @@ function Get-DomainChecks {
                 }
             }
 
-            if ($criticalBuckets.Count -eq 0) {
+            if ((Get-AuditCollectionCount $criticalBuckets) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'BCK-09' `
                     -Status 'PARTIAL' `
                     -Evidence @{
-                        bucket_count          = $bucketNames.Count
+                        bucket_count          = (Get-AuditCollectionCount $bucketNames)
                         critical_bucket_count = 0
                     } `
                     -Notes 'No critical buckets identified by naming convention (cross-reference DAT-17)'
@@ -657,7 +659,7 @@ function Get-DomainChecks {
             foreach ($bucketName in $criticalBuckets) {
                 $versionData = Invoke-AWSCLI -Arguments @('s3api', 'get-bucket-versioning', '--bucket', $bucketName) -Region $Region
                 $enabled = $false
-                if ($versionData -and $versionData.PSObject.Properties.Name -contains 'Status') {
+                if ($versionData -and (Test-AuditHasProperty -Object $versionData -PropertyName 'Status')) {
                     $enabled = ([string]$versionData.Status -eq 'Enabled')
                 }
 
@@ -668,7 +670,7 @@ function Get-DomainChecks {
                     $versioningDisabled++
                 }
 
-                if ($bucketEvidence.Count -lt 10) {
+                if ((Get-AuditCollectionCount $bucketEvidence) -lt 10) {
                     $bucketEvidence += @{
                         bucket_name = $bucketName
                         versioning  = $enabled
@@ -677,7 +679,7 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                critical_bucket_count = $criticalBuckets.Count
+                critical_bucket_count = (Get-AuditCollectionCount $criticalBuckets)
                 versioning_enabled    = $versioningEnabled
                 versioning_disabled   = $versioningDisabled
                 buckets               = @($bucketEvidence)
@@ -703,11 +705,11 @@ function Get-DomainChecks {
             }
 
             $fileSystems = @()
-            if ($data.FileSystems) {
+            if (Test-AuditHasProperty -Object $data -PropertyName 'FileSystems') {
                 $fileSystems = @($data.FileSystems)
             }
 
-            if ($fileSystems.Count -eq 0) {
+            if ((Get-AuditCollectionCount $fileSystems) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'BCK-10' `
                     -Status 'PARTIAL' -Evidence @{ efs_count = 0 } -Notes 'No EFS file systems found in region'
@@ -733,7 +735,7 @@ function Get-DomainChecks {
                     $disabledCount++
                 }
 
-                if ($efsEvidence.Count -lt 10) {
+                if ((Get-AuditCollectionCount $efsEvidence) -lt 10) {
                     $efsEvidence += @{
                         file_system_id = $fileSystemId
                         backup_status  = $status
@@ -742,7 +744,7 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                efs_count       = $fileSystems.Count
+                efs_count       = (Get-AuditCollectionCount $fileSystems)
                 enabled_count   = $enabledCount
                 disabled_count  = $disabledCount
                 file_systems    = @($efsEvidence)
@@ -762,7 +764,7 @@ function Get-DomainChecks {
         'BCK-11' = {
             param([string]$AccountId, [string]$AccountName, [string]$Region)
 
-            $tableNames = @()
+            $tableNames = New-AuditList
             $exclusiveStart = $null
 
             do {
@@ -776,19 +778,21 @@ function Get-DomainChecks {
                     return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'BCK-11'
                 }
 
-                if ($listData.TableNames) {
-                    $tableNames += @($listData.TableNames)
+                if (Test-AuditHasProperty -Object $listData -PropertyName 'TableNames') {
+                    foreach ($tableName in (Get-AuditCliArray $listData.TableNames)) {
+                        [void]$tableNames.Add($tableName)
+                    }
                 }
 
                 $exclusiveStart = $null
-                if ($listData.PSObject.Properties.Name -contains 'LastEvaluatedTableName') {
+                if ((Test-AuditHasProperty -Object $listData -PropertyName 'LastEvaluatedTableName')) {
                     if (-not [string]::IsNullOrWhiteSpace([string]$listData.LastEvaluatedTableName)) {
                         $exclusiveStart = [string]$listData.LastEvaluatedTableName
                     }
                 }
             } while ($exclusiveStart)
 
-            if ($tableNames.Count -eq 0) {
+            if ((Get-AuditCollectionCount $tableNames) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'BCK-11' `
                     -Status 'PARTIAL' -Evidence @{ table_count = 0 } -Notes 'No DynamoDB tables found in region'
@@ -813,7 +817,7 @@ function Get-DomainChecks {
                     $disabledCount++
                 }
 
-                if ($tableEvidence.Count -lt 10) {
+                if ((Get-AuditCollectionCount $tableEvidence) -lt 10) {
                     $tableEvidence += @{
                         table_name  = $tableName
                         pitr_status = $pitrStatus
@@ -822,7 +826,7 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                table_count     = $tableNames.Count
+                table_count     = (Get-AuditCollectionCount $tableNames)
                 enabled_count   = $enabledCount
                 disabled_count  = $disabledCount
                 tables          = @($tableEvidence)
@@ -863,7 +867,7 @@ function Get-DomainChecks {
                 return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'BCK-14'
             }
 
-            if ($plans.Count -eq 0) {
+            if ((Get-AuditCollectionCount $plans) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'BCK-14' `
                     -Status 'FAIL' -Evidence @{ plan_count = 0 } -Notes 'No backup plans found'
@@ -874,7 +878,7 @@ function Get-DomainChecks {
 
             foreach ($plan in $plans) {
                 $planDetails = Get-BckBackupPlanDetails -Region $Region -BackupPlanId $plan.BackupPlanId
-                if ($null -eq $planDetails -or -not $planDetails.BackupPlan -or -not $planDetails.BackupPlan.Rules) {
+                if ($null -eq $planDetails -or -not (Test-AuditHasProperty -Object $planDetails -PropertyName 'BackupPlan') -or -not (Test-AuditHasProperty -Object $planDetails -PropertyName 'BackupPlan').Rules) {
                     continue
                 }
 
@@ -899,12 +903,12 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                rule_count     = $ruleEvidence.Count
+                rule_count     = (Get-AuditCollectionCount $ruleEvidence)
                 failing_rules  = $failingRules
                 rules          = @($ruleEvidence)
             }
 
-            if ($ruleEvidence.Count -eq 0) {
+            if ((Get-AuditCollectionCount $ruleEvidence) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'BCK-14' `
                     -Status 'FAIL' -Evidence $evidence -Notes 'No backup retention rules found'
@@ -964,7 +968,7 @@ function Get-DomainChecks {
         'BCK-20' = {
             param([string]$AccountId, [string]$AccountName, [string]$Region)
 
-            $resources = @()
+            $resources = New-AuditList
             $token = $null
 
             do {
@@ -978,12 +982,14 @@ function Get-DomainChecks {
                     return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'BCK-20'
                 }
 
-                if ($data.Results) {
-                    $resources += @($data.Results)
+                if (Test-AuditHasProperty -Object $data -PropertyName 'Results') {
+                    foreach ($resource in (Get-AuditCliArray $data.Results)) {
+                        [void]$resources.Add($resource)
+                    }
                 }
 
                 $token = $null
-                if ($data.PSObject.Properties.Name -contains 'NextToken') {
+                if ((Test-AuditHasProperty -Object $data -PropertyName 'NextToken')) {
                     if (-not [string]::IsNullOrWhiteSpace([string]$data.NextToken)) {
                         $token = [string]$data.NextToken
                     }
@@ -993,7 +999,7 @@ function Get-DomainChecks {
             $typeCounts = @{}
             foreach ($resource in $resources) {
                 $resourceType = [string]$resource.ResourceType
-                if (-not $typeCounts.ContainsKey($resourceType)) {
+                if (-not (Test-AuditHasProperty -Object $typeCounts -PropertyName 'ContainsKey')($resourceType)) {
                     $typeCounts[$resourceType] = 0
                 }
                 $typeCounts[$resourceType] = $typeCounts[$resourceType] + 1
@@ -1004,7 +1010,7 @@ function Get-DomainChecks {
             $hasEfs = ($typeCounts.ContainsKey('EFS'))
 
             $evidence = @{
-                protected_resource_count = $resources.Count
+                protected_resource_count = (Get-AuditCollectionCount $resources)
                 resource_type_counts     = $typeCounts
             }
 
@@ -1014,7 +1020,7 @@ function Get-DomainChecks {
                     -Status 'PASS' -Evidence $evidence -Notes 'Protected resources include EC2, RDS, and EFS'
             }
 
-            if ($resources.Count -eq 0) {
+            if ((Get-AuditCollectionCount $resources) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'BCK-20' `
                     -Status 'FAIL' -Evidence $evidence -Notes 'No protected backup resources found'

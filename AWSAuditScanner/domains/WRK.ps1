@@ -34,7 +34,7 @@ function Get-WrkTaggedResourceSummary {
         [string]$Region
     )
 
-    $resources = @()
+    $resources = New-AuditList
     $paginationToken = $null
     $serviceTypes = @{}
 
@@ -49,12 +49,14 @@ function Get-WrkTaggedResourceSummary {
             return $null
         }
 
-        if ($data.ResourceTagMappingList) {
-            $resources += @($data.ResourceTagMappingList)
+        if (Test-AuditHasProperty -Object $data -PropertyName 'ResourceTagMappingList') {
+            foreach ($resource in (Get-AuditCliArray $data.ResourceTagMappingList)) {
+                [void]$resources.Add($resource)
+            }
         }
 
         $paginationToken = $null
-        if ($data.PSObject.Properties.Name -contains 'PaginationToken') {
+        if ((Test-AuditHasProperty -Object $data -PropertyName 'PaginationToken')) {
             if (-not [string]::IsNullOrWhiteSpace([string]$data.PaginationToken)) {
                 $paginationToken = [string]$data.PaginationToken
             }
@@ -65,7 +67,7 @@ function Get-WrkTaggedResourceSummary {
         $arn = [string]$resource.ResourceARN
         if ($arn -match 'arn:aws:([^:]+):') {
             $service = $Matches[1]
-            if (-not $serviceTypes.ContainsKey($service)) {
+            if (-not (Test-AuditHasProperty -Object $serviceTypes -PropertyName 'ContainsKey')($service)) {
                 $serviceTypes[$service] = 0
             }
             $serviceTypes[$service] = $serviceTypes[$service] + 1
@@ -73,7 +75,7 @@ function Get-WrkTaggedResourceSummary {
     }
 
     return @{
-        resource_count = $resources.Count
+        resource_count = (Get-AuditCollectionCount $resources)
         service_types  = $serviceTypes
     }
 }
@@ -90,8 +92,8 @@ function Get-WrkSsmStringParameterCount {
     }
 
     $stringCount = 0
-    if ($data.Parameters) {
-        foreach ($parameter in $data.Parameters) {
+    if (Test-AuditHasProperty -Object $data -PropertyName 'Parameters') {
+        foreach ($parameter in (Get-AuditCliArray $data.$Parameters)) {
             if ([string]$parameter.Type -eq 'String') {
                 $stringCount++
             }
@@ -113,14 +115,14 @@ function Get-WrkActiveAccessKeyCount {
     }
 
     $activeKeyCount = 0
-    if ($userData.Users) {
-        foreach ($user in $userData.Users) {
+    if (Test-AuditHasProperty -Object $userData -PropertyName 'Users') {
+        foreach ($user in (Get-AuditCliArray $userData.$Users)) {
             $keyData = Invoke-AWSCLI -Arguments @('iam', 'list-access-keys', '--user-name', $user.UserName) -Region $Region
-            if ($null -eq $keyData -or -not $keyData.AccessKeyMetadata) {
+            if ($null -eq $keyData -or -not (Test-AuditHasProperty -Object $keyData -PropertyName 'AccessKeyMetadata')) {
                 continue
             }
 
-            foreach ($key in $keyData.AccessKeyMetadata) {
+            foreach ($key in (Get-AuditCliArray $keyData.$AccessKeyMetadata)) {
                 if ($key.Status -eq 'Active') {
                     $activeKeyCount++
                 }
@@ -154,7 +156,7 @@ function Get-WrkLambdaFunctions {
         [string]$Region
     )
 
-    $functions = @()
+    $functions = New-AuditList
     $marker = $null
 
     do {
@@ -168,19 +170,21 @@ function Get-WrkLambdaFunctions {
             return $null
         }
 
-        if ($data.Functions) {
-            $functions += @($data.Functions)
+        if (Test-AuditHasProperty -Object $data -PropertyName 'Functions') {
+            foreach ($function in (Get-AuditCliArray $data.Functions)) {
+                [void]$functions.Add($function)
+            }
         }
 
         $marker = $null
-        if ($data.PSObject.Properties.Name -contains 'NextMarker') {
+        if ((Test-AuditHasProperty -Object $data -PropertyName 'NextMarker')) {
             if (-not [string]::IsNullOrWhiteSpace([string]$data.NextMarker)) {
                 $marker = [string]$data.NextMarker
             }
         }
     } while ($marker)
 
-    return $functions
+    return $functions.ToArray()
 }
 
 function Get-DomainChecks {
@@ -213,12 +217,12 @@ function Get-DomainChecks {
 
             $workloadRoles = @()
             $roleCount = 0
-            if ($data.Roles) {
-                $roleCount = @($data.Roles).Count
-                foreach ($role in $data.Roles) {
+            if (Test-AuditHasProperty -Object $data -PropertyName 'Roles') {
+                $roleCount = (Get-AuditCollectionCount $data.Roles)
+                foreach ($role in (Get-AuditCliArray $data.$Roles)) {
                     $roleName = [string]$role.RoleName
                     if ($roleName -match 'workload|app|svc|service|lambda|ecs|eks') {
-                        if ($workloadRoles.Count -lt 10) {
+                        if ((Get-AuditCollectionCount $workloadRoles) -lt 10) {
                             $workloadRoles += $roleName
                         }
                     }
@@ -276,11 +280,11 @@ function Get-DomainChecks {
             $privateDbCount = 0
             $publicDbs = @()
 
-            if ($rdsData.DBInstances) {
-                foreach ($instance in $rdsData.DBInstances) {
+            if (Test-AuditHasProperty -Object $rdsData -PropertyName 'DBInstances') {
+                foreach ($instance in (Get-AuditCliArray $rdsData.$DBInstances)) {
                     if ($instance.PubliclyAccessible -eq $true) {
                         $publicDbCount++
-                        if ($publicDbs.Count -lt 5) {
+                        if ((Get-AuditCollectionCount $publicDbs) -lt 5) {
                             $publicDbs += [string]$instance.DBInstanceIdentifier
                         }
                     }
@@ -293,15 +297,15 @@ function Get-DomainChecks {
             $openSearchPublicCount = 0
             $domainData = Invoke-AWSCLI -Arguments @('opensearch', 'list-domain-names') -Region $Region
             if ($domainData -and $domainData.DomainNames) {
-                foreach ($domainEntry in $domainData.DomainNames) {
+                foreach ($domainEntry in (Get-AuditCliArray $domainData.$DomainNames)) {
                     $domainName = [string]$domainEntry.DomainName
                     $describeData = Invoke-AWSCLI -Arguments @('opensearch', 'describe-domain', '--domain-name', $domainName) -Region $Region
-                    if ($null -eq $describeData -or -not $describeData.DomainStatus) {
+                    if ($null -eq $describeData -or -not (Test-AuditHasProperty -Object $describeData -PropertyName 'DomainStatus')) {
                         continue
                     }
 
                     $vpcOptions = $describeData.DomainStatus.VPCOptions
-                    if (-not $vpcOptions -or -not $vpcOptions.SubnetIds) {
+                    if (-not $vpcOptions -or -not (Test-AuditHasProperty -Object $vpcOptions -PropertyName 'SubnetIds')) {
                         $openSearchPublicCount++
                     }
                 }
@@ -333,7 +337,7 @@ function Get-DomainChecks {
                 return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'WRK-06'
             }
 
-            if ($functions.Count -eq 0) {
+            if ((Get-AuditCollectionCount $functions) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'WRK-06' `
                     -Status 'PARTIAL' -Evidence @{ lambda_count = 0 } -Notes 'No Lambda functions found in region'
@@ -347,7 +351,7 @@ function Get-DomainChecks {
                 $hasVpc = $false
 
                 if ($configData -and $configData.VpcConfig -and $configData.VpcConfig.SubnetIds) {
-                    if (@($configData.VpcConfig.SubnetIds).Count -gt 0) {
+                    if ((Get-AuditCollectionCount $configData.VpcConfig.SubnetIds) -gt 0) {
                         $hasVpc = $true
                     }
                 }
@@ -361,7 +365,7 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                lambda_count    = $functions.Count
+                lambda_count    = (Get-AuditCollectionCount $functions)
                 with_vpc_count  = $withVpc
                 without_vpc_count = $withoutVpc
             }
@@ -409,7 +413,7 @@ function Get-DomainChecks {
 
             $matchingAlarms = @()
             $allAlarms = @()
-            if ($data.MetricAlarms) {
+            if (Test-AuditHasProperty -Object $data -PropertyName 'MetricAlarms') {
                 $allAlarms = @($data.MetricAlarms)
             }
 
@@ -420,18 +424,18 @@ function Get-DomainChecks {
                 $combined = ($alarmName + ' ' + $metricName + ' ' + $namespace)
 
                 if ($combined -match 'Error|Errors|Failed|Failure|Lambda|ECS|EKS') {
-                    if ($matchingAlarms.Count -lt 10) {
+                    if ((Get-AuditCollectionCount $matchingAlarms) -lt 10) {
                         $matchingAlarms += $alarmName
                     }
                 }
             }
 
             $evidence = @{
-                alarm_count      = $allAlarms.Count
+                alarm_count      = (Get-AuditCollectionCount $allAlarms)
                 matching_alarms  = @($matchingAlarms)
             }
 
-            if ($matchingAlarms.Count -gt 0) {
+            if ((Get-AuditCollectionCount $matchingAlarms) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'WRK-09' `
                     -Status 'PASS' -Evidence $evidence -Notes 'CloudWatch alarms exist for workload error monitoring'
@@ -496,14 +500,14 @@ function Get-DomainChecks {
             $cutoff = (Get-Date).AddMonths(-12)
 
             foreach ($function in $functions) {
-                if (-not $function.LastModified) {
+                if (-not (Test-AuditHasProperty -Object $function -PropertyName 'LastModified')) {
                     continue
                 }
 
                 $lastModified = [datetime]$function.LastModified
                 if ($lastModified -lt $cutoff) {
                     $staleCount++
-                    if ($staleFunctions.Count -lt 10) {
+                    if ((Get-AuditCollectionCount $staleFunctions) -lt 10) {
                         $staleFunctions += [string]$function.FunctionName
                     }
                 }
@@ -513,7 +517,7 @@ function Get-DomainChecks {
                 -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'WRK-15' `
                 -Status 'PARTIAL' `
                 -Evidence @{
-                    lambda_count   = $functions.Count
+                    lambda_count   = (Get-AuditCollectionCount $functions)
                     stale_count    = $staleCount
                     stale_functions = @($staleFunctions)
                 } `
@@ -533,17 +537,17 @@ function Get-DomainChecks {
 
             foreach ($function in $functions) {
                 $runtime = 'unknown'
-                if ($function.Runtime) {
+                if (Test-AuditHasProperty -Object $function -PropertyName 'Runtime') {
                     $runtime = [string]$function.Runtime
                 }
 
-                if (-not $runtimeSummary.ContainsKey($runtime)) {
+                if (-not (Test-AuditHasProperty -Object $runtimeSummary -PropertyName 'ContainsKey')($runtime)) {
                     $runtimeSummary[$runtime] = 0
                 }
                 $runtimeSummary[$runtime] = $runtimeSummary[$runtime] + 1
 
                 if ($Script:WrkEolRuntimes -contains $runtime) {
-                    if ($eolFunctions.Count -lt 10) {
+                    if ((Get-AuditCollectionCount $eolFunctions) -lt 10) {
                         $eolFunctions += @{
                             name    = [string]$function.FunctionName
                             runtime = $runtime
@@ -553,12 +557,12 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                function_count   = $functions.Count
+                function_count   = (Get-AuditCollectionCount $functions)
                 runtimes         = $runtimeSummary
                 eol_functions    = @($eolFunctions)
             }
 
-            if ($eolFunctions.Count -gt 0) {
+            if ((Get-AuditCollectionCount $eolFunctions) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'WRK-16' `
                     -Status 'FAIL' -Evidence $evidence -Notes 'Lambda functions using EOL runtimes found'
@@ -578,11 +582,11 @@ function Get-DomainChecks {
             }
 
             $taskDefs = @()
-            if ($listData.taskDefinitionArns) {
+            if (Test-AuditHasProperty -Object $listData -PropertyName 'taskDefinitionArns') {
                 $taskDefs = @($listData.taskDefinitionArns)
             }
 
-            if ($taskDefs.Count -eq 0) {
+            if ((Get-AuditCollectionCount $taskDefs) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'WRK-17' `
                     -Status 'PARTIAL' -Evidence @{ task_definition_count = 0 } -Notes 'No active ECS task definitions found'
@@ -594,7 +598,7 @@ function Get-DomainChecks {
 
             foreach ($taskDefArn in $taskDefs) {
                 $describeData = Invoke-AWSCLI -Arguments @('ecs', 'describe-task-definition', '--task-definition', $taskDefArn) -Region $Region
-                if ($null -eq $describeData -or -not $describeData.taskDefinition) {
+                if ($null -eq $describeData -or -not (Test-AuditHasProperty -Object $describeData -PropertyName 'taskDefinition')) {
                     continue
                 }
 
@@ -603,14 +607,14 @@ function Get-DomainChecks {
                 }
                 else {
                     $withoutRole++
-                    if ($missingRoleDefs.Count -lt 5) {
+                    if ((Get-AuditCollectionCount $missingRoleDefs) -lt 5) {
                         $missingRoleDefs += [string]$describeData.taskDefinition.family
                     }
                 }
             }
 
             $evidence = @{
-                task_definition_count = $taskDefs.Count
+                task_definition_count = (Get-AuditCollectionCount $taskDefs)
                 with_task_role_count  = $withRole
                 without_task_role_count = $withoutRole
                 missing_role_families = @($missingRoleDefs)
@@ -639,7 +643,7 @@ function Get-DomainChecks {
 
             $repoCount = 0
             if ($repoData -and $repoData.repositories) {
-                $repoCount = @($repoData.repositories).Count
+                $repoCount = (Get-AuditCollectionCount $repoData.repositories)
             }
 
             $scanOnPush = $false
@@ -680,11 +684,11 @@ function Get-DomainChecks {
             }
 
             $clusters = @()
-            if ($listData.clusters) {
+            if (Test-AuditHasProperty -Object $listData -PropertyName 'clusters') {
                 $clusters = @($listData.clusters)
             }
 
-            if ($clusters.Count -eq 0) {
+            if ((Get-AuditCollectionCount $clusters) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'WRK-19' `
                     -Status 'PARTIAL' -Evidence @{ cluster_count = 0 } -Notes 'No EKS clusters found in region'
@@ -695,7 +699,7 @@ function Get-DomainChecks {
 
             foreach ($clusterName in $clusters) {
                 $describeData = Invoke-AWSCLI -Arguments @('eks', 'describe-cluster', '--name', $clusterName) -Region $Region
-                if ($null -eq $describeData -or -not $describeData.cluster) {
+                if ($null -eq $describeData -or -not (Test-AuditHasProperty -Object $describeData -PropertyName 'cluster')) {
                     continue
                 }
 
@@ -708,7 +712,7 @@ function Get-DomainChecks {
                     if ($vpcConfig.endpointPublicAccess -eq $true) {
                         $publicAccess = $true
                     }
-                    if ($vpcConfig.publicAccessCidrs) {
+                    if (Test-AuditHasProperty -Object $vpcConfig -PropertyName 'publicAccessCidrs') {
                         $publicCidrs = @($vpcConfig.publicAccessCidrs)
                         foreach ($cidr in $publicCidrs) {
                             if ([string]$cidr -eq '0.0.0.0/0') {
@@ -730,7 +734,7 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                cluster_count     = $clusters.Count
+                cluster_count     = (Get-AuditCollectionCount $clusters)
                 failing_clusters  = $failingClusters
                 clusters          = @($clusterEvidence)
             }
@@ -755,11 +759,11 @@ function Get-DomainChecks {
             }
 
             $clusters = @()
-            if ($listData.clusters) {
+            if (Test-AuditHasProperty -Object $listData -PropertyName 'clusters') {
                 $clusters = @($listData.clusters)
             }
 
-            if ($clusters.Count -eq 0) {
+            if ((Get-AuditCollectionCount $clusters) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'WRK-20' `
                     -Status 'PARTIAL' -Evidence @{ cluster_count = 0 } -Notes 'No EKS clusters found in region'
@@ -771,7 +775,7 @@ function Get-DomainChecks {
 
             foreach ($clusterName in $clusters) {
                 $describeData = Invoke-AWSCLI -Arguments @('eks', 'describe-cluster', '--name', $clusterName) -Region $Region
-                if ($null -eq $describeData -or -not $describeData.cluster) {
+                if ($null -eq $describeData -or -not (Test-AuditHasProperty -Object $describeData -PropertyName 'cluster')) {
                     continue
                 }
 
@@ -779,7 +783,7 @@ function Get-DomainChecks {
                 if ($describeData.cluster.logging -and $describeData.cluster.logging.clusterLogging) {
                     foreach ($logEntry in $describeData.cluster.logging.clusterLogging) {
                         if ($logEntry.enabled -eq $true -and $logEntry.types) {
-                            foreach ($logType in $logEntry.types) {
+                            foreach ($logType in (Get-AuditCliArray $logEntry.$types)) {
                                 if ($enabledTypes -notcontains $logType) {
                                     $enabledTypes += [string]$logType
                                 }
@@ -806,7 +810,7 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                cluster_count    = $clusters.Count
+                cluster_count    = (Get-AuditCollectionCount $clusters)
                 failing_clusters = $failingClusters
                 clusters         = @($clusterEvidence)
             }
@@ -834,11 +838,11 @@ function Get-DomainChecks {
             $privateCount = 0
             $publicInstances = @()
 
-            if ($rdsData.DBInstances) {
-                foreach ($instance in $rdsData.DBInstances) {
+            if (Test-AuditHasProperty -Object $rdsData -PropertyName 'DBInstances') {
+                foreach ($instance in (Get-AuditCliArray $rdsData.$DBInstances)) {
                     if ($instance.PubliclyAccessible -eq $true) {
                         $publicCount++
-                        if ($publicInstances.Count -lt 5) {
+                        if ((Get-AuditCollectionCount $publicInstances) -lt 5) {
                             $publicInstances += [string]$instance.DBInstanceIdentifier
                         }
                     }
@@ -881,7 +885,7 @@ function Get-DomainChecks {
 
             $sqsData = Invoke-AWSCLI -Arguments @('sqs', 'list-queues') -Region $Region
             if ($sqsData -and $sqsData.QueueUrls) {
-                foreach ($queueUrl in $sqsData.QueueUrls) {
+                foreach ($queueUrl in (Get-AuditCliArray $sqsData.$QueueUrls)) {
                     $queueCount++
                     $attrData = Invoke-AWSCLI -Arguments @('sqs', 'get-queue-attributes', '--queue-url', $queueUrl, '--attribute-names', 'Policy') -Region $Region
                     if ($attrData -and $attrData.Attributes -and $attrData.Attributes.Policy) {
@@ -894,8 +898,8 @@ function Get-DomainChecks {
 
             $snsData = Invoke-AWSCLI -Arguments @('sns', 'list-topics') -Region $Region
             if ($snsData -and $snsData.Topics) {
-                foreach ($topic in $snsData.Topics) {
-                    if (-not $topic.TopicArn) {
+                foreach ($topic in (Get-AuditCliArray $snsData.$Topics)) {
+                    if (-not (Test-AuditHasProperty -Object $topic -PropertyName 'TopicArn')) {
                         continue
                     }
 
@@ -941,7 +945,7 @@ function Get-DomainChecks {
 
             $sqsData = Invoke-AWSCLI -Arguments @('sqs', 'list-queues') -Region $Region
             if ($sqsData -and $sqsData.QueueUrls) {
-                foreach ($queueUrl in $sqsData.QueueUrls) {
+                foreach ($queueUrl in (Get-AuditCliArray $sqsData.$QueueUrls)) {
                     $attrData = Invoke-AWSCLI -Arguments @(
                         'sqs', 'get-queue-attributes', '--queue-url', $queueUrl,
                         '--attribute-names', 'KmsMasterKeyId', 'SqsManagedSseEnabled'
@@ -968,8 +972,8 @@ function Get-DomainChecks {
 
             $snsData = Invoke-AWSCLI -Arguments @('sns', 'list-topics') -Region $Region
             if ($snsData -and $snsData.Topics) {
-                foreach ($topic in $snsData.Topics) {
-                    if (-not $topic.TopicArn) {
+                foreach ($topic in (Get-AuditCliArray $snsData.$Topics)) {
+                    if (-not (Test-AuditHasProperty -Object $topic -PropertyName 'TopicArn')) {
                         continue
                     }
 
@@ -1028,11 +1032,11 @@ function Get-DomainChecks {
             }
 
             $apis = @()
-            if ($apiData.items) {
+            if (Test-AuditHasProperty -Object $apiData -PropertyName 'items') {
                 $apis = @($apiData.items)
             }
 
-            if ($apis.Count -eq 0) {
+            if ((Get-AuditCollectionCount $apis) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'WRK-24' `
                     -Status 'PARTIAL' -Evidence @{ api_count = 0 } -Notes 'No REST APIs found in region'
@@ -1042,17 +1046,17 @@ function Get-DomainChecks {
             $methodCount = 0
 
             foreach ($api in $apis) {
-                if (-not $api.id) {
+                if (-not (Test-AuditHasProperty -Object $api -PropertyName 'id')) {
                     continue
                 }
 
                 $resourceData = Invoke-AWSCLI -Arguments @('apigateway', 'get-resources', '--rest-api-id', $api.id) -Region $Region
-                if ($null -eq $resourceData -or -not $resourceData.items) {
+                if ($null -eq $resourceData -or -not (Test-AuditHasProperty -Object $resourceData -PropertyName 'items')) {
                     continue
                 }
 
-                foreach ($resource in $resourceData.items) {
-                    if (-not $resource.resourceMethods) {
+                foreach ($resource in (Get-AuditCliArray $resourceData.$items)) {
+                    if (-not (Test-AuditHasProperty -Object $resource -PropertyName 'resourceMethods')) {
                         continue
                     }
 
@@ -1073,7 +1077,7 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                api_count                   = $apis.Count
+                api_count                   = (Get-AuditCollectionCount $apis)
                 method_count                = $methodCount
                 unauthenticated_method_count = $unauthenticatedMethods
             }
@@ -1098,11 +1102,11 @@ function Get-DomainChecks {
             }
 
             $apis = @()
-            if ($apiData.items) {
+            if (Test-AuditHasProperty -Object $apiData -PropertyName 'items') {
                 $apis = @($apiData.items)
             }
 
-            if ($apis.Count -eq 0) {
+            if ((Get-AuditCollectionCount $apis) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'WRK-25' `
                     -Status 'PARTIAL' -Evidence @{ api_count = 0 } -Notes 'No REST APIs found in region'
@@ -1112,20 +1116,20 @@ function Get-DomainChecks {
             $stagesWithThrottling = 0
 
             foreach ($api in $apis) {
-                if (-not $api.id) {
+                if (-not (Test-AuditHasProperty -Object $api -PropertyName 'id')) {
                     continue
                 }
 
                 $stageData = Invoke-AWSCLI -Arguments @('apigateway', 'get-stages', '--rest-api-id', $api.id) -Region $Region
-                if ($null -eq $stageData -or -not $stageData.item) {
+                if ($null -eq $stageData -or -not (Test-AuditHasProperty -Object $stageData -PropertyName 'item')) {
                     continue
                 }
 
-                foreach ($stage in $stageData.item) {
+                foreach ($stage in (Get-AuditCliArray $stageData.$item)) {
                     $stageCount++
                     $hasThrottling = $false
 
-                    if ($stage.methodSettings) {
+                    if (Test-AuditHasProperty -Object $stage -PropertyName 'methodSettings') {
                         foreach ($settingName in $stage.methodSettings.PSObject.Properties.Name) {
                             $setting = $stage.methodSettings.$settingName
                             if ($setting.throttlingBurstLimit -or $setting.throttlingRateLimit) {
@@ -1135,7 +1139,7 @@ function Get-DomainChecks {
                         }
                     }
 
-                    if ($stage.defaultRouteSettings) {
+                    if (Test-AuditHasProperty -Object $stage -PropertyName 'defaultRouteSettings') {
                         if ($stage.defaultRouteSettings.throttlingBurstLimit -or $stage.defaultRouteSettings.throttlingRateLimit) {
                             $hasThrottling = $true
                         }
@@ -1148,7 +1152,7 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                api_count                 = $apis.Count
+                api_count                 = (Get-AuditCollectionCount $apis)
                 stage_count               = $stageCount
                 stages_with_throttling    = $stagesWithThrottling
             }
@@ -1179,11 +1183,11 @@ function Get-DomainChecks {
             }
 
             $pools = @()
-            if ($listData.UserPools) {
+            if (Test-AuditHasProperty -Object $listData -PropertyName 'UserPools') {
                 $pools = @($listData.UserPools)
             }
 
-            if ($pools.Count -eq 0) {
+            if ((Get-AuditCollectionCount $pools) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'WRK-26' `
                     -Status 'PARTIAL' -Evidence @{ user_pool_count = 0 } -Notes 'No Cognito user pools found in region'
@@ -1193,7 +1197,7 @@ function Get-DomainChecks {
             $failingPools = 0
 
             foreach ($pool in $pools) {
-                if (-not $pool.Id) {
+                if (-not (Test-AuditHasProperty -Object $pool -PropertyName 'Id')) {
                     continue
                 }
 
@@ -1215,7 +1219,7 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                user_pool_count = $pools.Count
+                user_pool_count = (Get-AuditCollectionCount $pools)
                 failing_pools   = $failingPools
                 pools           = @($poolEvidence)
             }

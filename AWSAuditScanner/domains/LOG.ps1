@@ -34,8 +34,8 @@ function Get-LogCloudTrails {
         return $null
     }
 
-    if ($data.trailList) {
-        return @($data.trailList)
+    if (Test-AuditHasProperty -Object $data -PropertyName 'trailList') {
+        return (Get-AuditCliArray $data.trailList)
     }
 
     return @()
@@ -74,11 +74,11 @@ function Get-LogTrailIdentifier {
         $Trail
     )
 
-    if ($Trail.TrailARN) {
+    if (Test-AuditHasProperty -Object $Trail -PropertyName 'TrailARN') {
         return [string]$Trail.TrailARN
     }
 
-    if ($Trail.Name) {
+    if (Test-AuditHasProperty -Object $Trail -PropertyName 'Name') {
         return [string]$Trail.Name
     }
 
@@ -91,7 +91,7 @@ function Get-LogCloudTrailLogGroupName {
         $Trail
     )
 
-    if (-not $Trail.CloudWatchLogsLogGroupArn) {
+    if (-not (Test-AuditHasProperty -Object $Trail -PropertyName 'CloudWatchLogsLogGroupArn')) {
         return $null
     }
 
@@ -117,16 +117,16 @@ function Test-LogS3BucketSseKms {
         return $false
     }
 
-    if (-not $data.ServerSideEncryptionConfiguration) {
+    if (-not (Test-AuditHasProperty -Object $data -PropertyName 'ServerSideEncryptionConfiguration')) {
         return $false
     }
 
-    if (-not $data.ServerSideEncryptionConfiguration.Rules) {
+    if (-not (Test-AuditHasProperty -Object $data -PropertyName 'ServerSideEncryptionConfiguration').Rules) {
         return $false
     }
 
     foreach ($rule in $data.ServerSideEncryptionConfiguration.Rules) {
-        if ($rule.ApplyServerSideEncryptionByDefault) {
+        if (Test-AuditHasProperty -Object $rule -PropertyName 'ApplyServerSideEncryptionByDefault') {
             $algorithm = [string]$rule.ApplyServerSideEncryptionByDefault.SSEAlgorithm
             if ($algorithm -eq 'aws:kms') {
                 return $true
@@ -151,7 +151,7 @@ function Test-LogS3BucketPublicAccessBlocked {
         return $false
     }
 
-    if (-not $data.PublicAccessBlockConfiguration) {
+    if (-not (Test-AuditHasProperty -Object $data -PropertyName 'PublicAccessBlockConfiguration')) {
         return $false
     }
 
@@ -176,7 +176,7 @@ function Test-LogS3BucketVersioningEnabled {
         return $false
     }
 
-    if ($data.PSObject.Properties.Name -contains 'Status') {
+    if ((Test-AuditHasProperty -Object $data -PropertyName 'Status')) {
         return ([string]$data.Status -eq 'Enabled')
     }
 
@@ -197,7 +197,7 @@ function Test-LogBucketPolicyPublicRead {
         return $false
     }
 
-    if (-not $data.Policy) {
+    if (-not (Test-AuditHasProperty -Object $data -PropertyName 'Policy')) {
         return $false
     }
 
@@ -243,9 +243,9 @@ function Get-LogCisMetricFilterAssessment {
     }
 
     $filterPatterns = @()
-    if ($filterData.metricFilters) {
-        foreach ($filter in $filterData.metricFilters) {
-            if ($filter.filterPattern) {
+    if (Test-AuditHasProperty -Object $filterData -PropertyName 'metricFilters') {
+        foreach ($filter in (Get-AuditCliArray $filterData.$metricFilters)) {
+            if (Test-AuditHasProperty -Object $filter -PropertyName 'filterPattern') {
                 $filterPatterns += [string]$filter.filterPattern
             }
         }
@@ -275,9 +275,9 @@ function Get-LogCisMetricFilterAssessment {
     return @{
         matched_patterns = @($matched)
         missing_patterns   = @($missing)
-        matched_count      = $matched.Count
-        missing_count      = $missing.Count
-        filter_count       = $filterPatterns.Count
+        matched_count      = (Get-AuditCollectionCount $matched)
+        missing_count      = (Get-AuditCollectionCount $missing)
+        filter_count       = (Get-AuditCollectionCount $filterPatterns)
     }
 }
 
@@ -291,7 +291,7 @@ function Get-DomainChecks {
                 return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'LOG-01'
             }
 
-            if ($trails.Count -eq 0) {
+            if ((Get-AuditCollectionCount $trails) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'LOG-01' `
                     -Status 'FAIL' -Evidence @{ trail_count = 0 } -Notes 'No CloudTrail trails found'
@@ -318,11 +318,11 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                trail_count   = $trails.Count
+                trail_count   = (Get-AuditCollectionCount $trails)
                 active_trails = @($activeTrails)
             }
 
-            if ($activeTrails.Count -gt 0) {
+            if ((Get-AuditCollectionCount $activeTrails) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'LOG-01' `
                     -Status 'PASS' -Evidence $evidence -Notes 'At least one CloudTrail trail has IsLogging=true'
@@ -353,11 +353,11 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                matching_trail_count = $matchingTrails.Count
+                matching_trail_count = (Get-AuditCollectionCount $matchingTrails)
                 trails               = @($matchingTrails)
             }
 
-            if ($matchingTrails.Count -gt 0) {
+            if ((Get-AuditCollectionCount $matchingTrails) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'LOG-02' `
                     -Status 'PASS' -Evidence $evidence -Notes 'Multi-region organization CloudTrail trail found'
@@ -378,7 +378,7 @@ function Get-DomainChecks {
 
             $orgTrail = Get-LogOrganizationTrail -Trails $trails
             if (-not $orgTrail) {
-                if ($trails.Count -gt 0) {
+                if ((Get-AuditCollectionCount $trails) -gt 0) {
                     $orgTrail = $trails[0]
                 }
             }
@@ -397,8 +397,8 @@ function Get-DomainChecks {
 
             $passFound = $false
             $selectorEvidence = @()
-            if ($selectorData.EventSelectors) {
-                foreach ($selector in $selectorData.EventSelectors) {
+            if (Test-AuditHasProperty -Object $selectorData -PropertyName 'EventSelectors') {
+                foreach ($selector in (Get-AuditCliArray $selectorData.$EventSelectors)) {
                     $readWriteType = [string]$selector.ReadWriteType
                     $includeManagement = ($selector.IncludeManagementEvents -eq $true)
                     $selectorEvidence += @{
@@ -437,7 +437,7 @@ function Get-DomainChecks {
             }
 
             $orgTrail = Get-LogOrganizationTrail -Trails $trails
-            if (-not $orgTrail -and $trails.Count -gt 0) {
+            if (-not $orgTrail -and (Get-AuditCollectionCount $trails) -gt 0) {
                 $orgTrail = $trails[0]
             }
 
@@ -454,13 +454,13 @@ function Get-DomainChecks {
             }
 
             $s3DataResources = @()
-            if ($selectorData.EventSelectors) {
-                foreach ($selector in $selectorData.EventSelectors) {
-                    if ($selector.DataResources) {
-                        foreach ($resource in $selector.DataResources) {
+            if (Test-AuditHasProperty -Object $selectorData -PropertyName 'EventSelectors') {
+                foreach ($selector in (Get-AuditCliArray $selectorData.$EventSelectors)) {
+                    if (Test-AuditHasProperty -Object $selector -PropertyName 'DataResources') {
+                        foreach ($resource in (Get-AuditCliArray $selector.$DataResources)) {
                             if ([string]$resource.Type -eq 'AWS::S3::Object') {
                                 $values = @()
-                                if ($resource.Values) {
+                                if (Test-AuditHasProperty -Object $resource -PropertyName 'Values') {
                                     $values = @($resource.Values)
                                 }
                                 $s3DataResources += @{
@@ -476,10 +476,10 @@ function Get-DomainChecks {
             $evidence = @{
                 trail_name          = [string]$orgTrail.Name
                 s3_data_resources   = @($s3DataResources)
-                s3_data_resource_count = $s3DataResources.Count
+                s3_data_resource_count = (Get-AuditCollectionCount $s3DataResources)
             }
 
-            if ($s3DataResources.Count -gt 0) {
+            if ((Get-AuditCollectionCount $s3DataResources) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'LOG-04' `
                     -Status 'PASS' -Evidence $evidence -Notes 'S3 data events configured on CloudTrail'
@@ -538,7 +538,7 @@ function Get-DomainChecks {
             }
 
             $kmsKeyId = $null
-            if ($orgTrail.KMSKeyId) {
+            if (Test-AuditHasProperty -Object $orgTrail -PropertyName 'KMSKeyId') {
                 $kmsKeyId = [string]$orgTrail.KMSKeyId
             }
 
@@ -568,12 +568,12 @@ function Get-DomainChecks {
 
             $orgTrail = Get-LogOrganizationTrail -Trails $trails
             if (-not $orgTrail) {
-                if ($trails.Count -gt 0) {
+                if ((Get-AuditCollectionCount $trails) -gt 0) {
                     $orgTrail = $trails[0]
                 }
             }
 
-            if (-not $orgTrail -or -not $orgTrail.S3BucketName) {
+            if (-not $orgTrail -or -not (Test-AuditHasProperty -Object $orgTrail -PropertyName 'S3BucketName')) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'LOG-07' `
                     -Status 'FAIL' -Evidence $null -Notes 'No CloudTrail log bucket configured'
@@ -612,12 +612,12 @@ function Get-DomainChecks {
 
             $orgTrail = Get-LogOrganizationTrail -Trails $trails
             if (-not $orgTrail) {
-                if ($trails.Count -gt 0) {
+                if ((Get-AuditCollectionCount $trails) -gt 0) {
                     $orgTrail = $trails[0]
                 }
             }
 
-            if (-not $orgTrail -or -not $orgTrail.S3BucketName) {
+            if (-not $orgTrail -or -not (Test-AuditHasProperty -Object $orgTrail -PropertyName 'S3BucketName')) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'LOG-08' `
                     -Status 'FAIL' -Evidence $null -Notes 'No CloudTrail log bucket configured'
@@ -636,7 +636,7 @@ function Get-DomainChecks {
             $mode = $null
             $retention = $null
 
-            if ($lockData.ObjectLockConfiguration) {
+            if (Test-AuditHasProperty -Object $lockData -PropertyName 'ObjectLockConfiguration') {
                 if ($lockData.ObjectLockConfiguration.ObjectLockEnabled) {
                     $enabled = ([string]$lockData.ObjectLockConfiguration.ObjectLockEnabled -eq 'Enabled')
                 }
@@ -675,7 +675,7 @@ function Get-DomainChecks {
             }
 
             $logGroups = @()
-            if ($data.logGroups) {
+            if (Test-AuditHasProperty -Object $data -PropertyName 'logGroups') {
                 $logGroups = @($data.logGroups)
             }
 
@@ -684,7 +684,7 @@ function Get-DomainChecks {
 
             foreach ($logGroup in $logGroups) {
                 $hasRetention = $false
-                if ($logGroup.PSObject.Properties.Name -contains 'retentionInDays') {
+                if ((Test-AuditHasProperty -Object $logGroup -PropertyName 'retentionInDays')) {
                     if ($null -ne $logGroup.retentionInDays) {
                         $hasRetention = $true
                     }
@@ -692,14 +692,14 @@ function Get-DomainChecks {
 
                 if (-not $hasRetention) {
                     $nullRetentionCount++
-                    if ($nullRetentionNames.Count -lt 5) {
+                    if ((Get-AuditCollectionCount $nullRetentionNames) -lt 5) {
                         $nullRetentionNames += [string]$logGroup.logGroupName
                     }
                 }
             }
 
             $evidence = @{
-                log_group_count        = $logGroups.Count
+                log_group_count        = (Get-AuditCollectionCount $logGroups)
                 null_retention_count   = $nullRetentionCount
                 null_retention_names   = @($nullRetentionNames)
             }
@@ -726,8 +726,8 @@ function Get-DomainChecks {
             $cloudTrailGroups = @()
             $flowLogGroups = @()
 
-            if ($data.logGroups) {
-                foreach ($logGroup in $data.logGroups) {
+            if (Test-AuditHasProperty -Object $data -PropertyName 'logGroups') {
+                foreach ($logGroup in (Get-AuditCliArray $data.$logGroups)) {
                     $name = [string]$logGroup.logGroupName
                     $lowerName = $name.ToLower()
                     if ($lowerName -match 'cloudtrail|aws-cloudtrail') {
@@ -744,13 +744,13 @@ function Get-DomainChecks {
                 flow_log_groups       = @($flowLogGroups)
             }
 
-            if ($cloudTrailGroups.Count -gt 0 -and $flowLogGroups.Count -gt 0) {
+            if ((Get-AuditCollectionCount $cloudTrailGroups) -gt 0 -and (Get-AuditCollectionCount $flowLogGroups) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'LOG-10' `
                     -Status 'PASS' -Evidence $evidence -Notes 'CloudTrail and VPC Flow Logs log groups found'
             }
 
-            if ($cloudTrailGroups.Count -gt 0 -or $flowLogGroups.Count -gt 0) {
+            if ((Get-AuditCollectionCount $cloudTrailGroups) -gt 0 -or (Get-AuditCollectionCount $flowLogGroups) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'LOG-10' `
                     -Status 'PARTIAL' -Evidence $evidence -Notes 'Only CloudTrail or VPC Flow Logs log group found'
@@ -771,12 +771,12 @@ function Get-DomainChecks {
 
             $orgTrail = Get-LogOrganizationTrail -Trails $trails
             if (-not $orgTrail) {
-                if ($trails.Count -gt 0) {
+                if ((Get-AuditCollectionCount $trails) -gt 0) {
                     $orgTrail = $trails[0]
                 }
             }
 
-            if (-not $orgTrail -or -not $orgTrail.S3BucketName) {
+            if (-not $orgTrail -or -not (Test-AuditHasProperty -Object $orgTrail -PropertyName 'S3BucketName')) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'LOG-11' `
                     -Status 'FAIL' -Evidence $null -Notes 'No CloudTrail log bucket configured'
@@ -812,12 +812,12 @@ function Get-DomainChecks {
             }
 
             $vpcs = @()
-            if ($vpcData.Vpcs) {
+            if (Test-AuditHasProperty -Object $vpcData -PropertyName 'Vpcs') {
                 $vpcs = @($vpcData.Vpcs)
             }
 
             $flowLogs = @()
-            if ($flowData.FlowLogs) {
+            if (Test-AuditHasProperty -Object $flowData -PropertyName 'FlowLogs') {
                 $flowLogs = @($flowData.FlowLogs)
             }
 
@@ -828,7 +828,7 @@ function Get-DomainChecks {
                     continue
                 }
 
-                if (-not $flowLog.ResourceId) {
+                if (-not (Test-AuditHasProperty -Object $flowLog -PropertyName 'ResourceId')) {
                     continue
                 }
 
@@ -851,37 +851,37 @@ function Get-DomainChecks {
                 }
 
                 if ($vpcWithPartialFlowLogs.ContainsKey($vpcId)) {
-                    if ($partialVpcIds.Count -lt 10) {
+                    if ((Get-AuditCollectionCount $partialVpcIds) -lt 10) {
                         $partialVpcIds += $vpcId
                     }
                     continue
                 }
 
-                if ($missingVpcIds.Count -lt 10) {
+                if ((Get-AuditCollectionCount $missingVpcIds) -lt 10) {
                     $missingVpcIds += $vpcId
                 }
             }
 
             $evidence = @{
-                vpc_count                 = $vpcs.Count
-                vpcs_with_all_flow_logs   = $vpcWithAllFlowLogs.Count
+                vpc_count                 = (Get-AuditCollectionCount $vpcs)
+                vpcs_with_all_flow_logs   = (Get-AuditCollectionCount $vpcWithAllFlowLogs)
                 missing_vpc_ids           = @($missingVpcIds)
                 partial_traffic_vpc_ids   = @($partialVpcIds)
             }
 
-            if ($missingVpcIds.Count -gt 0) {
+            if ((Get-AuditCollectionCount $missingVpcIds) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'LOG-12' `
                     -Status 'FAIL' -Evidence $evidence -Notes 'One or more VPCs missing active Flow Logs'
             }
 
-            if ($partialVpcIds.Count -gt 0) {
+            if ((Get-AuditCollectionCount $partialVpcIds) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'LOG-12' `
                     -Status 'PARTIAL' -Evidence $evidence -Notes 'Flow Logs exist but TrafficType is not ALL on some VPCs'
             }
 
-            if ($vpcs.Count -eq 0) {
+            if ((Get-AuditCollectionCount $vpcs) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'LOG-12' `
                     -Status 'PARTIAL' -Evidence $evidence -Notes 'No VPCs found in region'
@@ -901,11 +901,11 @@ function Get-DomainChecks {
             }
 
             $loadBalancers = @()
-            if ($lbData.LoadBalancers) {
+            if (Test-AuditHasProperty -Object $lbData -PropertyName 'LoadBalancers') {
                 $loadBalancers = @($lbData.LoadBalancers)
             }
 
-            if ($loadBalancers.Count -eq 0) {
+            if ((Get-AuditCollectionCount $loadBalancers) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'LOG-13' `
                     -Status 'PARTIAL' -Evidence @{ alb_count = 0 } -Notes 'No ALBs found in region'
@@ -915,7 +915,7 @@ function Get-DomainChecks {
             $withoutAccessLogs = @()
 
             foreach ($loadBalancer in $loadBalancers) {
-                if (-not $loadBalancer.LoadBalancerArn) {
+                if (-not (Test-AuditHasProperty -Object $loadBalancer -PropertyName 'LoadBalancerArn')) {
                     continue
                 }
 
@@ -925,15 +925,15 @@ function Get-DomainChecks {
                 ) -Region $Region
 
                 if ($null -eq $attrData) {
-                    if ($withoutAccessLogs.Count -lt 5) {
+                    if ((Get-AuditCollectionCount $withoutAccessLogs) -lt 5) {
                         $withoutAccessLogs += [string]$loadBalancer.LoadBalancerName
                     }
                     continue
                 }
 
                 $enabled = $false
-                if ($attrData.Attributes) {
-                    foreach ($attribute in $attrData.Attributes) {
+                if (Test-AuditHasProperty -Object $attrData -PropertyName 'Attributes') {
+                    foreach ($attribute in (Get-AuditCliArray $attrData.$Attributes)) {
                         if ($attribute.Key -eq 'access_logs.s3.enabled' -and $attribute.Value -eq 'true') {
                             $enabled = $true
                             break
@@ -945,19 +945,19 @@ function Get-DomainChecks {
                     $withAccessLogs++
                 }
                 else {
-                    if ($withoutAccessLogs.Count -lt 5) {
+                    if ((Get-AuditCollectionCount $withoutAccessLogs) -lt 5) {
                         $withoutAccessLogs += [string]$loadBalancer.LoadBalancerName
                     }
                 }
             }
 
             $evidence = @{
-                alb_count              = $loadBalancers.Count
+                alb_count              = (Get-AuditCollectionCount $loadBalancers)
                 alb_with_access_logs = $withAccessLogs
                 alb_without_access_logs = @($withoutAccessLogs)
             }
 
-            if ($withoutAccessLogs.Count -gt 0) {
+            if ((Get-AuditCollectionCount $withoutAccessLogs) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'LOG-13' `
                     -Status 'FAIL' -Evidence $evidence -Notes 'One or more ALBs missing access logs'
@@ -983,7 +983,7 @@ function Get-DomainChecks {
             $matchingAlarms = @()
 
             if ($rulesData -and $rulesData.Rules) {
-                foreach ($rule in $rulesData.Rules) {
+                foreach ($rule in (Get-AuditCliArray $rulesData.$Rules)) {
                     $ruleName = [string]$rule.Name
                     $eventPattern = [string]$rule.EventPattern
                     if ($eventPattern -match $iamPatterns -or $ruleName -match 'IAM|Root|ConsoleLogin') {
@@ -993,7 +993,7 @@ function Get-DomainChecks {
             }
 
             if ($alarmsData -and $alarmsData.MetricAlarms) {
-                foreach ($alarm in $alarmsData.MetricAlarms) {
+                foreach ($alarm in (Get-AuditCliArray $alarmsData.$MetricAlarms)) {
                     $alarmName = [string]$alarm.AlarmName
                     if ($alarmName -match 'IAM|Root|ConsoleLogin|CreateUser|DeleteUser|CreateAccessKey') {
                         $matchingAlarms += $alarmName
@@ -1006,7 +1006,7 @@ function Get-DomainChecks {
                 matching_alarm_names = @($matchingAlarms)
             }
 
-            if ($matchingRules.Count -gt 0 -or $matchingAlarms.Count -gt 0) {
+            if ((Get-AuditCollectionCount $matchingRules) -gt 0 -or (Get-AuditCollectionCount $matchingAlarms) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'LOG-14' `
                     -Status 'PASS' -Evidence $evidence -Notes 'IAM alerting rules or alarms found'
@@ -1036,7 +1036,7 @@ function Get-DomainChecks {
             if (-not $logGroupName) {
                 $logGroupData = Invoke-AWSCLI -Arguments @('logs', 'describe-log-groups') -Region $Region
                 if ($logGroupData -and $logGroupData.logGroups) {
-                    foreach ($logGroup in $logGroupData.logGroups) {
+                    foreach ($logGroup in (Get-AuditCliArray $logGroupData.$logGroups)) {
                         $name = [string]$logGroup.logGroupName
                         if ($name -match 'CloudTrail|cloudtrail') {
                             $logGroupName = $name
@@ -1124,13 +1124,13 @@ function Get-DomainChecks {
             $bucketNames = @()
             $prefixes = @()
             foreach ($trail in $trails) {
-                if ($trail.S3BucketName) {
+                if (Test-AuditHasProperty -Object $trail -PropertyName 'S3BucketName') {
                     $bucket = [string]$trail.S3BucketName
                     if ($bucketNames -notcontains $bucket) {
                         $bucketNames += $bucket
                     }
                 }
-                if ($trail.S3KeyPrefix) {
+                if (Test-AuditHasProperty -Object $trail -PropertyName 'S3KeyPrefix') {
                     $prefix = [string]$trail.S3KeyPrefix
                     if ($prefixes -notcontains $prefix) {
                         $prefixes += $prefix
@@ -1150,13 +1150,13 @@ function Get-DomainChecks {
                 appears_nonprod = $isNonProd
             }
 
-            if ($bucketNames.Count -gt 1) {
+            if ((Get-AuditCollectionCount $bucketNames) -gt 1) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'LOG-20' `
                     -Status 'PASS' -Evidence $evidence -Notes 'Distinct CloudTrail log buckets found in account'
             }
 
-            if ($bucketNames.Count -eq 1 -and $prefixes.Count -gt 1) {
+            if ((Get-AuditCollectionCount $bucketNames) -eq 1 -and (Get-AuditCollectionCount $prefixes) -gt 1) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'LOG-20' `
                     -Status 'PARTIAL' -Evidence $evidence -Notes 'Same bucket with different prefixes may separate environments'
@@ -1180,7 +1180,7 @@ function Get-DomainChecks {
             if ($orgTrail -and $orgTrail.S3BucketName) {
                 $logBucketName = [string]$orgTrail.S3BucketName
             }
-            elseif ($trails.Count -gt 0 -and $trails[0].S3BucketName) {
+            elseif ((Get-AuditCollectionCount $trails) -gt 0 -and $trails[0].S3BucketName) {
                 $logBucketName = [string]$trails[0].S3BucketName
             }
 
@@ -1201,7 +1201,7 @@ function Get-DomainChecks {
 
             $matchingEvents = 0
             if ($data.Events -and $logBucketName) {
-                foreach ($event in $data.Events) {
+                foreach ($event in (Get-AuditCliArray $data.$Events)) {
                     $eventJson = [string]$event.CloudTrailEvent
                     if ($eventJson -match [regex]::Escape($logBucketName)) {
                         $matchingEvents++
@@ -1215,8 +1215,8 @@ function Get-DomainChecks {
                 log_bucket_event_count  = $matchingEvents
             }
 
-            if ($data.Events) {
-                $evidence.s3_event_count = @($data.Events).Count
+            if (Test-AuditHasProperty -Object $data -PropertyName 'Events') {
+                $evidence.s3_event_count = (Get-AuditCollectionCount $data.Events)
             }
 
             if ($matchingEvents -gt 0) {

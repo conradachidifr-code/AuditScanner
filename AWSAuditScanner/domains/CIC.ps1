@@ -31,9 +31,9 @@ function Get-CicS3BucketNames {
     }
 
     $bucketNames = @()
-    if ($data.Buckets) {
-        foreach ($bucket in $data.Buckets) {
-            if ($bucket.Name) {
+    if (Test-AuditHasProperty -Object $data -PropertyName 'Buckets') {
+        foreach ($bucket in (Get-AuditCliArray $data.$Buckets)) {
+            if (Test-AuditHasProperty -Object $bucket -PropertyName 'Name') {
                 $bucketNames += [string]$bucket.Name
             }
         }
@@ -73,7 +73,7 @@ function Test-CicS3BucketPublicAccessBlocked {
         return $false
     }
 
-    if (-not $data.PublicAccessBlockConfiguration) {
+    if (-not (Test-AuditHasProperty -Object $data -PropertyName 'PublicAccessBlockConfiguration')) {
         return $false
     }
 
@@ -98,7 +98,7 @@ function Test-CicS3BucketVersioningEnabled {
         return $false
     }
 
-    if ($data.PSObject.Properties.Name -contains 'Status') {
+    if ((Test-AuditHasProperty -Object $data -PropertyName 'Status')) {
         return ([string]$data.Status -eq 'Enabled')
     }
 
@@ -119,8 +119,8 @@ function Get-CicSsmStringParameterCount {
     $stringCount = 0
     $secureStringCount = 0
 
-    if ($data.Parameters) {
-        foreach ($parameter in $data.Parameters) {
+    if (Test-AuditHasProperty -Object $data -PropertyName 'Parameters') {
+        foreach ($parameter in (Get-AuditCliArray $data.$Parameters)) {
             $paramType = [string]$parameter.Type
             if ($paramType -eq 'String') {
                 $stringCount++
@@ -151,22 +151,22 @@ function Get-CicActiveAccessKeyCount {
     $activeKeyCount = 0
     $usersWithKeys = @()
 
-    if ($userData.Users) {
-        foreach ($user in $userData.Users) {
+    if (Test-AuditHasProperty -Object $userData -PropertyName 'Users') {
+        foreach ($user in (Get-AuditCliArray $userData.$Users)) {
             $userName = [string]$user.UserName
             $keyData = Invoke-AWSCLI -Arguments @('iam', 'list-access-keys', '--user-name', $userName) -Region $Region
             if ($null -eq $keyData) {
                 continue
             }
 
-            if (-not $keyData.AccessKeyMetadata) {
+            if (-not (Test-AuditHasProperty -Object $keyData -PropertyName 'AccessKeyMetadata')) {
                 continue
             }
 
-            foreach ($key in $keyData.AccessKeyMetadata) {
+            foreach ($key in (Get-AuditCliArray $keyData.$AccessKeyMetadata)) {
                 if ($key.Status -eq 'Active') {
                     $activeKeyCount++
-                    if ($usersWithKeys.Count -lt 5) {
+                    if ((Get-AuditCollectionCount $usersWithKeys) -lt 5) {
                         $usersWithKeys += $userName
                     }
                 }
@@ -195,8 +195,8 @@ function Get-CicCloudFormationStackCount {
         return $null
     }
 
-    if ($data.StackSummaries) {
-        return @($data.StackSummaries).Count
+    if (Test-AuditHasProperty -Object $data -PropertyName 'StackSummaries') {
+        return (Get-AuditCollectionCount $data.StackSummaries)
     }
 
     return 0
@@ -316,7 +316,7 @@ function Get-DomainChecks {
                 }
             }
 
-            if ($stateBuckets.Count -eq 0) {
+            if ((Get-AuditCollectionCount $stateBuckets) -eq 0) {
                 $stackCount = Get-CicCloudFormationStackCount -Region $Region
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-09' `
@@ -349,7 +349,7 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                state_bucket_count = $stateBuckets.Count
+                state_bucket_count = (Get-AuditCollectionCount $stateBuckets)
                 buckets              = @($bucketEvidence)
             }
 
@@ -383,8 +383,8 @@ function Get-DomainChecks {
             }
 
             $eventCount = 0
-            if ($data.Events) {
-                $eventCount = @($data.Events).Count
+            if (Test-AuditHasProperty -Object $data -PropertyName 'Events') {
+                $eventCount = (Get-AuditCollectionCount $data.Events)
             }
 
             $evidence = @{ cloudformation_event_count_last_30_days = $eventCount }
@@ -422,8 +422,8 @@ function Get-DomainChecks {
             $recorderNames = @()
 
             if ($statusData -and $statusData.ConfigurationRecordersStatus) {
-                foreach ($status in $statusData.ConfigurationRecordersStatus) {
-                    if ($status.name) {
+                foreach ($status in (Get-AuditCliArray $statusData.$ConfigurationRecordersStatus)) {
+                    if (Test-AuditHasProperty -Object $status -PropertyName 'name') {
                         $recorderNames += [string]$status.name
                     }
                     if ($status.recording -eq $true) {
@@ -434,7 +434,7 @@ function Get-DomainChecks {
 
             $resourceTypes = @()
             if ($recorderData -and $recorderData.ConfigurationRecorders) {
-                foreach ($recorder in $recorderData.ConfigurationRecorders) {
+                foreach ($recorder in (Get-AuditCliArray $recorderData.$ConfigurationRecorders)) {
                     if ($recorder.recordingGroup -and $recorder.recordingGroup.allSupported -eq $true) {
                         $resourceTypes += 'ALL_SUPPORTED'
                     }
@@ -500,13 +500,13 @@ function Get-DomainChecks {
             $consoleLikeEvents = 0
             $sampleEventNames = @()
 
-            if ($data.Events) {
-                $sampledEventCount = @($data.Events).Count
-                foreach ($event in $data.Events) {
+            if (Test-AuditHasProperty -Object $data -PropertyName 'Events') {
+                $sampledEventCount = (Get-AuditCollectionCount $data.Events)
+                foreach ($event in (Get-AuditCliArray $data.$Events)) {
                     $eventText = [string]$event.CloudTrailEvent
                     if ($eventText -match 'console\.amazonaws\.com|AWS Console|Console') {
                         $consoleLikeEvents++
-                        if ($sampleEventNames.Count -lt 5 -and $event.EventName) {
+                        if ((Get-AuditCollectionCount $sampleEventNames) -lt 5 -and $event.EventName) {
                             $sampleEventNames += [string]$event.EventName
                         }
                     }
@@ -543,8 +543,8 @@ function Get-DomainChecks {
             $pipelineGroups = @()
             $groupsWithoutRetention = @()
 
-            if ($data.logGroups) {
-                foreach ($logGroup in $data.logGroups) {
+            if (Test-AuditHasProperty -Object $data -PropertyName 'logGroups') {
+                foreach ($logGroup in (Get-AuditCliArray $data.$logGroups)) {
                     $name = [string]$logGroup.logGroupName
                     $lowerName = $name.ToLower()
                     if ($lowerName -notmatch 'pipeline|codebuild|codepipeline|gitlab|ci/|/ci') {
@@ -552,7 +552,7 @@ function Get-DomainChecks {
                     }
 
                     $retention = $null
-                    if ($logGroup.PSObject.Properties.Name -contains 'retentionInDays') {
+                    if ((Test-AuditHasProperty -Object $logGroup -PropertyName 'retentionInDays')) {
                         $retention = $logGroup.retentionInDays
                     }
 
@@ -562,7 +562,7 @@ function Get-DomainChecks {
                     }
 
                     if ($null -eq $retention) {
-                        if ($groupsWithoutRetention.Count -lt 5) {
+                        if ((Get-AuditCollectionCount $groupsWithoutRetention) -lt 5) {
                             $groupsWithoutRetention += $name
                         }
                     }
@@ -570,18 +570,18 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                pipeline_log_group_count = $pipelineGroups.Count
+                pipeline_log_group_count = (Get-AuditCollectionCount $pipelineGroups)
                 pipeline_log_groups      = @($pipelineGroups)
                 groups_without_retention = @($groupsWithoutRetention)
             }
 
-            if ($pipelineGroups.Count -eq 0) {
+            if ((Get-AuditCollectionCount $pipelineGroups) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-17' `
                     -Status 'PARTIAL' -Evidence $evidence -Notes 'No pipeline-related log groups identified by naming'
             }
 
-            if ($groupsWithoutRetention.Count -eq 0) {
+            if ((Get-AuditCollectionCount $groupsWithoutRetention) -eq 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-17' `
                     -Status 'PASS' -Evidence $evidence -Notes 'Pipeline log groups have retention configured'
@@ -619,8 +619,8 @@ function Get-DomainChecks {
             }
 
             $eventCount = 0
-            if ($data.Events) {
-                $eventCount = @($data.Events).Count
+            if (Test-AuditHasProperty -Object $data -PropertyName 'Events') {
+                $eventCount = (Get-AuditCollectionCount $data.Events)
             }
 
             $evidence = @{ pipeline_event_count_last_30_days = $eventCount }
