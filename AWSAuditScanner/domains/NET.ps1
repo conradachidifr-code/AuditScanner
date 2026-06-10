@@ -27,6 +27,45 @@ $DomainSeverity = @{
     'NET-27' = 'P0'
 }
 
+function Get-NetCliArray {
+    param(
+        $Items
+    )
+
+    if ($null -eq $Items) {
+        return @()
+    }
+
+    if ($Items -is [System.Array]) {
+        return @($Items)
+    }
+
+    return @($Items)
+}
+
+function Test-NetHasProperty {
+    param(
+        $Object,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PropertyName
+    )
+
+    if ($null -eq $Object) {
+        return $false
+    }
+
+    return ($Object.PSObject.Properties.Name -contains $PropertyName)
+}
+
+function Get-NetCollectionCount {
+    param(
+        $Items
+    )
+
+    return (Get-NetCliArray $Items).Count
+}
+
 function Get-NetRouteTables {
     param(
         [Parameter(Mandatory = $true)]
@@ -38,8 +77,8 @@ function Get-NetRouteTables {
         return $null
     }
 
-    if ($data.RouteTables) {
-        return @($data.RouteTables)
+    if (Test-NetHasProperty $data 'RouteTables') {
+        return Get-NetCliArray $data.RouteTables
     }
 
     return @()
@@ -56,8 +95,8 @@ function Get-NetSubnets {
         return $null
     }
 
-    if ($data.Subnets) {
-        return @($data.Subnets)
+    if (Test-NetHasProperty $data 'Subnets') {
+        return Get-NetCliArray $data.Subnets
     }
 
     return @()
@@ -74,8 +113,8 @@ function Get-NetVpcs {
         return $null
     }
 
-    if ($data.Vpcs) {
-        return @($data.Vpcs)
+    if (Test-NetHasProperty $data 'Vpcs') {
+        return Get-NetCliArray $data.Vpcs
     }
 
     return @()
@@ -92,8 +131,8 @@ function Get-NetSecurityGroups {
         return $null
     }
 
-    if ($data.SecurityGroups) {
-        return @($data.SecurityGroups)
+    if (Test-NetHasProperty $data 'SecurityGroups') {
+        return Get-NetCliArray $data.SecurityGroups
     }
 
     return @()
@@ -105,13 +144,22 @@ function Test-NetRouteTableHasIgwRoute {
         $RouteTable
     )
 
-    if (-not $RouteTable.Routes) {
+    if (-not (Test-NetHasProperty $RouteTable 'Routes')) {
         return $false
     }
 
-    foreach ($route in $RouteTable.Routes) {
+    foreach ($route in (Get-NetCliArray $RouteTable.Routes)) {
+        if (-not (Test-NetHasProperty $route 'GatewayId')) {
+            continue
+        }
+
         if ($route.GatewayId -and [string]$route.GatewayId -like 'igw-*') {
-            if ([string]$route.DestinationCidrBlock -eq '0.0.0.0/0') {
+            $destination = ''
+            if (Test-NetHasProperty $route 'DestinationCidrBlock') {
+                $destination = [string]$route.DestinationCidrBlock
+            }
+
+            if ($destination -eq '0.0.0.0/0') {
                 return $true
             }
         }
@@ -134,8 +182,12 @@ function Get-NetSubnetRouteTableMap {
 
     $mainRouteTables = @{}
     foreach ($routeTable in $routeTables) {
-        foreach ($association in $routeTable.Associations) {
-            if ($association.Main -eq $true) {
+        if (-not (Test-NetHasProperty $routeTable 'Associations')) {
+            continue
+        }
+
+        foreach ($association in (Get-NetCliArray $routeTable.Associations)) {
+            if ((Test-NetHasProperty $association 'Main') -and ($association.Main -eq $true)) {
                 $mainRouteTables[[string]$routeTable.VpcId] = $routeTable
             }
         }
@@ -148,8 +200,12 @@ function Get-NetSubnetRouteTableMap {
         $matchedRouteTable = $null
 
         foreach ($routeTable in $routeTables) {
-            foreach ($association in $routeTable.Associations) {
-                if ($association.SubnetId -and [string]$association.SubnetId -eq $subnetId) {
+            if (-not (Test-NetHasProperty $routeTable 'Associations')) {
+                continue
+            }
+
+            foreach ($association in (Get-NetCliArray $routeTable.Associations)) {
+                if ((Test-NetHasProperty $association 'SubnetId') -and ([string]$association.SubnetId -eq $subnetId)) {
                     $matchedRouteTable = $routeTable
                     break
                 }
@@ -181,12 +237,12 @@ function Test-NetPermissionOpenToInternet {
         $Permission
     )
 
-    if (-not $Permission.IpRanges) {
+    if (-not (Test-NetHasProperty $Permission 'IpRanges')) {
         return $false
     }
 
-    foreach ($range in $Permission.IpRanges) {
-        if ([string]$range.CidrIp -eq '0.0.0.0/0') {
+    foreach ($range in (Get-NetCliArray $Permission.IpRanges)) {
+        if ((Test-NetHasProperty $range 'CidrIp') -and ([string]$range.CidrIp -eq '0.0.0.0/0')) {
             return $true
         }
     }
@@ -200,13 +256,12 @@ function Get-NetTagValueByKey {
         [string]$KeyName
     )
 
-    if (-not $Tags) {
-        return $null
-    }
-
-    foreach ($tag in $Tags) {
-        if ([string]$tag.Key -eq $KeyName) {
-            return [string]$tag.Value
+    foreach ($tag in (Get-NetCliArray $Tags)) {
+        if ((Test-NetHasProperty $tag 'Key') -and ([string]$tag.Key -eq $KeyName)) {
+            if (Test-NetHasProperty $tag 'Value') {
+                return [string]$tag.Value
+            }
+            return $null
         }
     }
 
@@ -256,27 +311,34 @@ function Get-DomainChecks {
                 return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'NET-02'
             }
 
+            $vpcList = Get-NetCliArray $vpcs
             $vpcEvidence = @()
-            foreach ($vpc in $vpcs) {
+            foreach ($vpc in $vpcList) {
+                $vpcName = $null
+                if (Test-NetHasProperty $vpc 'Tags') {
+                    $vpcName = Get-NetTagValueByKey -Tags $vpc.Tags -KeyName 'Name'
+                }
+
                 $vpcEvidence += @{
                     vpc_id     = [string]$vpc.VpcId
                     cidr_block = [string]$vpc.CidrBlock
-                    name       = Get-NetTagValueByKey -Tags $vpc.Tags -KeyName 'Name'
+                    name       = $vpcName
                 }
             }
 
+            $vpcCount = $vpcList.Count
             $evidence = @{
-                vpc_count = $vpcs.Count
+                vpc_count = $vpcCount
                 vpcs      = @($vpcEvidence)
             }
 
-            if ($vpcs.Count -gt 1) {
+            if ($vpcCount -gt 1) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'NET-02' `
                     -Status 'PASS' -Evidence $evidence -Notes 'Multiple VPCs provide environment segmentation'
             }
 
-            if ($vpcs.Count -eq 1) {
+            if ($vpcCount -eq 1) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'NET-02' `
                     -Status 'PARTIAL' -Evidence $evidence -Notes 'Single VPC in account; verify cross-account segmentation'
@@ -335,18 +397,18 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                vpc_count     = $vpcStats.Count
+                vpc_count     = $vpcStats.Keys.Count
                 passing_vpcs  = @($passingVpcs)
                 failing_vpcs  = @($failingVpcs)
             }
 
-            if ($failingVpcs.Count -gt 0) {
+            if ((Get-NetCollectionCount $failingVpcs) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'NET-03' `
                     -Status 'FAIL' -Evidence $evidence -Notes 'One or more VPCs have only public subnets'
             }
 
-            if ($passingVpcs.Count -gt 0) {
+            if ((Get-NetCollectionCount $passingVpcs) -gt 0) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'NET-03' `
                     -Status 'PASS' -Evidence $evidence -Notes 'Public and private subnets exist per VPC'
@@ -378,12 +440,12 @@ function Get-DomainChecks {
                 $isMain = $false
                 $associatedSubnets = @()
 
-                if ($routeTable.Associations) {
-                    foreach ($association in $routeTable.Associations) {
-                        if ($association.Main -eq $true) {
+                if (Test-NetHasProperty $routeTable 'Associations') {
+                    foreach ($association in (Get-NetCliArray $routeTable.Associations)) {
+                        if ((Test-NetHasProperty $association 'Main') -and ($association.Main -eq $true)) {
                             $isMain = $true
                         }
-                        if ($association.SubnetId) {
+                        if (Test-NetHasProperty $association 'SubnetId') {
                             $associatedSubnets += [string]$association.SubnetId
                         }
                     }
@@ -402,7 +464,7 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                route_table_count              = $routeTables.Count
+                route_table_count              = (Get-NetCollectionCount $routeTables)
                 igw_route_table_count          = $igwRouteTableCount
                 main_route_tables_with_igw     = @($mainTableWithIgw)
                 subnet_associated_igw_tables   = @($subnetAssociatedIgwTables)
@@ -428,27 +490,30 @@ function Get-DomainChecks {
             }
 
             $igws = @()
-            if ($data.InternetGateways) {
-                $igws = @($data.InternetGateways)
+            if (Test-NetHasProperty $data 'InternetGateways') {
+                $igws = Get-NetCliArray $data.InternetGateways
             }
 
             $attachedVpcIds = @()
             foreach ($igw in $igws) {
-                if ($igw.Attachments) {
-                    foreach ($attachment in $igw.Attachments) {
-                        if ($attachment.VpcId) {
-                            $attachedVpcIds += [string]$attachment.VpcId
-                        }
+                if (-not (Test-NetHasProperty $igw 'Attachments')) {
+                    continue
+                }
+
+                foreach ($attachment in (Get-NetCliArray $igw.Attachments)) {
+                    if (Test-NetHasProperty $attachment 'VpcId') {
+                        $attachedVpcIds += [string]$attachment.VpcId
                     }
                 }
             }
 
+            $igwCount = (Get-NetCollectionCount $igws)
             $evidence = @{
-                igw_count        = $igws.Count
+                igw_count        = $igwCount
                 attached_vpc_ids = @($attachedVpcIds)
             }
 
-            if ($igws.Count -le $attachedVpcIds.Count) {
+            if ($igwCount -le (Get-NetCollectionCount $attachedVpcIds)) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'NET-05' `
                     -Status 'PASS' -Evidence $evidence -Notes 'Internet Gateway usage appears limited to attached VPCs'
@@ -477,8 +542,8 @@ function Get-DomainChecks {
             }
 
             $natGateways = @()
-            if ($natData.NatGateways) {
-                $natGateways = @($natData.NatGateways)
+            if (Test-NetHasProperty $natData 'NatGateways') {
+                $natGateways = Get-NetCliArray $natData.NatGateways
             }
 
             $natVpcIds = @()
@@ -529,10 +594,10 @@ function Get-DomainChecks {
             $unrestrictedEgressCount = 0
             if ($securityGroups) {
                 foreach ($sg in $securityGroups) {
-                    if (-not $sg.IpPermissionsEgress) { continue }
-                    foreach ($rule in $sg.IpPermissionsEgress) {
+                    if (-not (Test-NetHasProperty $sg 'IpPermissionsEgress')) { continue }
+                    foreach ($rule in (Get-NetCliArray $sg.IpPermissionsEgress)) {
                         $openInternet = Test-NetPermissionOpenToInternet -Permission $rule
-                        $allTraffic = ($rule.IpProtocol -eq '-1')
+                        $allTraffic = ((Test-NetHasProperty $rule 'IpProtocol') -and ($rule.IpProtocol -eq '-1'))
                         if ($openInternet -and $allTraffic) {
                             $unrestrictedEgressCount++
                             break
@@ -573,9 +638,9 @@ function Get-DomainChecks {
 
             $offendingGroups = @()
             foreach ($sg in $securityGroups) {
-                if (-not $sg.IpPermissions) { continue }
+                if (-not (Test-NetHasProperty $sg 'IpPermissions')) { continue }
 
-                foreach ($rule in $sg.IpPermissions) {
+                foreach ($rule in (Get-NetCliArray $sg.IpPermissions)) {
                     if (-not (Test-NetPermissionOpenToInternet -Permission $rule)) {
                         continue
                     }
@@ -589,8 +654,9 @@ function Get-DomainChecks {
                         $toPort = [int]$rule.ToPort
                     }
 
-                    $allowsSsh = ($fromPort -le 22 -and $toPort -ge 22) -or ($rule.IpProtocol -eq '-1')
-                    $allowsRdp = ($fromPort -le 3389 -and $toPort -ge 3389) -or ($rule.IpProtocol -eq '-1')
+                    $allProtocols = ((Test-NetHasProperty $rule 'IpProtocol') -and ($rule.IpProtocol -eq '-1'))
+                    $allowsSsh = ($fromPort -le 22 -and $toPort -ge 22) -or $allProtocols
+                    $allowsRdp = ($fromPort -le 3389 -and $toPort -ge 3389) -or $allProtocols
 
                     if ($allowsSsh -or $allowsRdp) {
                         if ($offendingGroups.Count -lt 10) {
@@ -634,8 +700,8 @@ function Get-DomainChecks {
             $internetAdminExposure = $false
             if ($securityGroups) {
                 foreach ($sg in $securityGroups) {
-                    if (-not $sg.IpPermissions) { continue }
-                    foreach ($rule in $sg.IpPermissions) {
+                    if (-not (Test-NetHasProperty $sg 'IpPermissions')) { continue }
+                    foreach ($rule in (Get-NetCliArray $sg.IpPermissions)) {
                         if (-not (Test-NetPermissionOpenToInternet -Permission $rule)) { continue }
                         $fromPort = 0
                         $toPort = 65535
@@ -645,7 +711,8 @@ function Get-DomainChecks {
                         if ($rule.PSObject.Properties.Name -contains 'ToPort' -and $null -ne $rule.ToPort) {
                             $toPort = [int]$rule.ToPort
                         }
-                        if (($fromPort -le 22 -and $toPort -ge 22) -or ($fromPort -le 3389 -and $toPort -ge 3389) -or ($rule.IpProtocol -eq '-1')) {
+                        $allProtocols = ((Test-NetHasProperty $rule 'IpProtocol') -and ($rule.IpProtocol -eq '-1'))
+                        if (($fromPort -le 22 -and $toPort -ge 22) -or ($fromPort -le 3389 -and $toPort -ge 3389) -or $allProtocols) {
                             $internetAdminExposure = $true
                             break
                         }
@@ -686,9 +753,10 @@ function Get-DomainChecks {
 
             $openGroups = @()
             foreach ($sg in $securityGroups) {
-                if (-not $sg.IpPermissions) { continue }
-                foreach ($rule in $sg.IpPermissions) {
-                    if ((Test-NetPermissionOpenToInternet -Permission $rule) -and ($rule.IpProtocol -eq '-1')) {
+                if (-not (Test-NetHasProperty $sg 'IpPermissions')) { continue }
+                foreach ($rule in (Get-NetCliArray $sg.IpPermissions)) {
+                    $allProtocols = ((Test-NetHasProperty $rule 'IpProtocol') -and ($rule.IpProtocol -eq '-1'))
+                    if ((Test-NetPermissionOpenToInternet -Permission $rule) -and $allProtocols) {
                         if ($openGroups.Count -lt 10) {
                             $openGroups += [string]$sg.GroupId
                         }
@@ -698,7 +766,7 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                security_group_count = $securityGroups.Count
+                security_group_count = (Get-NetCollectionCount $securityGroups)
                 open_all_traffic_sgs = @($openGroups)
             }
 
