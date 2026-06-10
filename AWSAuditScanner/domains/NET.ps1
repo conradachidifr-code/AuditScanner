@@ -27,6 +27,8 @@ $DomainSeverity = @{
     'NET-27' = 'P0'
 }
 
+$Script:NetAnyCidr = '0.0.0.0/0'
+
 function Get-NetCliArray {
     param(
         $Items
@@ -77,7 +79,7 @@ function Get-NetRouteTables {
         return $null
     }
 
-    if (Test-NetHasProperty $data 'RouteTables') {
+    if (Test-NetHasProperty -Object $data -PropertyName 'RouteTables') {
         return Get-NetCliArray $data.RouteTables
     }
 
@@ -95,7 +97,7 @@ function Get-NetSubnets {
         return $null
     }
 
-    if (Test-NetHasProperty $data 'Subnets') {
+    if (Test-NetHasProperty -Object $data -PropertyName 'Subnets') {
         return Get-NetCliArray $data.Subnets
     }
 
@@ -113,7 +115,7 @@ function Get-NetVpcs {
         return $null
     }
 
-    if (Test-NetHasProperty $data 'Vpcs') {
+    if (Test-NetHasProperty -Object $data -PropertyName 'Vpcs') {
         return Get-NetCliArray $data.Vpcs
     }
 
@@ -131,7 +133,7 @@ function Get-NetSecurityGroups {
         return $null
     }
 
-    if (Test-NetHasProperty $data 'SecurityGroups') {
+    if (Test-NetHasProperty -Object $data -PropertyName 'SecurityGroups') {
         return Get-NetCliArray $data.SecurityGroups
     }
 
@@ -144,22 +146,22 @@ function Test-NetRouteTableHasIgwRoute {
         $RouteTable
     )
 
-    if (-not (Test-NetHasProperty $RouteTable 'Routes')) {
+    if (-not (Test-NetHasProperty -Object $RouteTable -PropertyName 'Routes')) {
         return $false
     }
 
     foreach ($route in (Get-NetCliArray $RouteTable.Routes)) {
-        if (-not (Test-NetHasProperty $route 'GatewayId')) {
+        if (-not (Test-NetHasProperty -Object $route -PropertyName 'GatewayId')) {
             continue
         }
 
         if ($route.GatewayId -and [string]$route.GatewayId -like 'igw-*') {
             $destination = ''
-            if (Test-NetHasProperty $route 'DestinationCidrBlock') {
+            if (Test-NetHasProperty -Object $route -PropertyName 'DestinationCidrBlock') {
                 $destination = [string]$route.DestinationCidrBlock
             }
 
-            if ($destination -eq '0.0.0.0/0') {
+            if ($destination -eq $Script:NetAnyCidr) {
                 return $true
             }
         }
@@ -182,12 +184,12 @@ function Get-NetSubnetRouteTableMap {
 
     $mainRouteTables = @{}
     foreach ($routeTable in $routeTables) {
-        if (-not (Test-NetHasProperty $routeTable 'Associations')) {
+        if (-not (Test-NetHasProperty -Object $routeTable -PropertyName 'Associations')) {
             continue
         }
 
         foreach ($association in (Get-NetCliArray $routeTable.Associations)) {
-            if ((Test-NetHasProperty $association 'Main') -and ($association.Main -eq $true)) {
+            if ((Test-NetHasProperty -Object $association -PropertyName 'Main') -and ($association.Main -eq $true)) {
                 $mainRouteTables[[string]$routeTable.VpcId] = $routeTable
             }
         }
@@ -200,12 +202,12 @@ function Get-NetSubnetRouteTableMap {
         $matchedRouteTable = $null
 
         foreach ($routeTable in $routeTables) {
-            if (-not (Test-NetHasProperty $routeTable 'Associations')) {
+            if (-not (Test-NetHasProperty -Object $routeTable -PropertyName 'Associations')) {
                 continue
             }
 
             foreach ($association in (Get-NetCliArray $routeTable.Associations)) {
-                if ((Test-NetHasProperty $association 'SubnetId') -and ([string]$association.SubnetId -eq $subnetId)) {
+                if ((Test-NetHasProperty -Object $association -PropertyName 'SubnetId') -and ([string]$association.SubnetId -eq $subnetId)) {
                     $matchedRouteTable = $routeTable
                     break
                 }
@@ -237,12 +239,12 @@ function Test-NetPermissionOpenToInternet {
         $Permission
     )
 
-    if (-not (Test-NetHasProperty $Permission 'IpRanges')) {
+    if (-not (Test-NetHasProperty -Object $Permission -PropertyName 'IpRanges')) {
         return $false
     }
 
     foreach ($range in (Get-NetCliArray $Permission.IpRanges)) {
-        if ((Test-NetHasProperty $range 'CidrIp') -and ([string]$range.CidrIp -eq '0.0.0.0/0')) {
+        if ((Test-NetHasProperty -Object $range -PropertyName 'CidrIp') -and ([string]$range.CidrIp -eq $Script:NetAnyCidr)) {
             return $true
         }
     }
@@ -257,8 +259,8 @@ function Get-NetTagValueByKey {
     )
 
     foreach ($tag in (Get-NetCliArray $Tags)) {
-        if ((Test-NetHasProperty $tag 'Key') -and ([string]$tag.Key -eq $KeyName)) {
-            if (Test-NetHasProperty $tag 'Value') {
+        if ((Test-NetHasProperty -Object $tag -PropertyName 'Key') -and ([string]$tag.Key -eq $KeyName)) {
+            if (Test-NetHasProperty -Object $tag -PropertyName 'Value') {
                 return [string]$tag.Value
             }
             return $null
@@ -315,7 +317,7 @@ function Get-DomainChecks {
             $vpcEvidence = @()
             foreach ($vpc in $vpcList) {
                 $vpcName = $null
-                if (Test-NetHasProperty $vpc 'Tags') {
+                if (Test-NetHasProperty -Object $vpc -PropertyName 'Tags') {
                     $vpcName = Get-NetTagValueByKey -Tags $vpc.Tags -KeyName 'Name'
                 }
 
@@ -440,12 +442,12 @@ function Get-DomainChecks {
                 $isMain = $false
                 $associatedSubnets = @()
 
-                if (Test-NetHasProperty $routeTable 'Associations') {
+                if (Test-NetHasProperty -Object $routeTable -PropertyName 'Associations') {
                     foreach ($association in (Get-NetCliArray $routeTable.Associations)) {
-                        if ((Test-NetHasProperty $association 'Main') -and ($association.Main -eq $true)) {
+                        if ((Test-NetHasProperty -Object $association -PropertyName 'Main') -and ($association.Main -eq $true)) {
                             $isMain = $true
                         }
-                        if (Test-NetHasProperty $association 'SubnetId') {
+                        if (Test-NetHasProperty -Object $association -PropertyName 'SubnetId') {
                             $associatedSubnets += [string]$association.SubnetId
                         }
                     }
@@ -490,18 +492,18 @@ function Get-DomainChecks {
             }
 
             $igws = @()
-            if (Test-NetHasProperty $data 'InternetGateways') {
+            if (Test-NetHasProperty -Object $data -PropertyName 'InternetGateways') {
                 $igws = Get-NetCliArray $data.InternetGateways
             }
 
             $attachedVpcIds = @()
             foreach ($igw in $igws) {
-                if (-not (Test-NetHasProperty $igw 'Attachments')) {
+                if (-not (Test-NetHasProperty -Object $igw -PropertyName 'Attachments')) {
                     continue
                 }
 
                 foreach ($attachment in (Get-NetCliArray $igw.Attachments)) {
-                    if (Test-NetHasProperty $attachment 'VpcId') {
+                    if (Test-NetHasProperty -Object $attachment -PropertyName 'VpcId') {
                         $attachedVpcIds += [string]$attachment.VpcId
                     }
                 }
@@ -542,7 +544,7 @@ function Get-DomainChecks {
             }
 
             $natGateways = @()
-            if (Test-NetHasProperty $natData 'NatGateways') {
+            if (Test-NetHasProperty -Object $natData -PropertyName 'NatGateways') {
                 $natGateways = Get-NetCliArray $natData.NatGateways
             }
 
@@ -594,10 +596,10 @@ function Get-DomainChecks {
             $unrestrictedEgressCount = 0
             if ($securityGroups) {
                 foreach ($sg in $securityGroups) {
-                    if (-not (Test-NetHasProperty $sg 'IpPermissionsEgress')) { continue }
+                    if (-not (Test-NetHasProperty -Object $sg -PropertyName 'IpPermissionsEgress')) { continue }
                     foreach ($rule in (Get-NetCliArray $sg.IpPermissionsEgress)) {
                         $openInternet = Test-NetPermissionOpenToInternet -Permission $rule
-                        $allTraffic = ((Test-NetHasProperty $rule 'IpProtocol') -and ($rule.IpProtocol -eq '-1'))
+                        $allTraffic = ((Test-NetHasProperty -Object $rule -PropertyName 'IpProtocol') -and ($rule.IpProtocol -eq '-1'))
                         if ($openInternet -and $allTraffic) {
                             $unrestrictedEgressCount++
                             break
@@ -638,7 +640,7 @@ function Get-DomainChecks {
 
             $offendingGroups = @()
             foreach ($sg in $securityGroups) {
-                if (-not (Test-NetHasProperty $sg 'IpPermissions')) { continue }
+                if (-not (Test-NetHasProperty -Object $sg -PropertyName 'IpPermissions')) { continue }
 
                 foreach ($rule in (Get-NetCliArray $sg.IpPermissions)) {
                     if (-not (Test-NetPermissionOpenToInternet -Permission $rule)) {
@@ -654,7 +656,7 @@ function Get-DomainChecks {
                         $toPort = [int]$rule.ToPort
                     }
 
-                    $allProtocols = ((Test-NetHasProperty $rule 'IpProtocol') -and ($rule.IpProtocol -eq '-1'))
+                    $allProtocols = ((Test-NetHasProperty -Object $rule -PropertyName 'IpProtocol') -and ($rule.IpProtocol -eq '-1'))
                     $allowsSsh = ($fromPort -le 22 -and $toPort -ge 22) -or $allProtocols
                     $allowsRdp = ($fromPort -le 3389 -and $toPort -ge 3389) -or $allProtocols
 
@@ -700,7 +702,7 @@ function Get-DomainChecks {
             $internetAdminExposure = $false
             if ($securityGroups) {
                 foreach ($sg in $securityGroups) {
-                    if (-not (Test-NetHasProperty $sg 'IpPermissions')) { continue }
+                    if (-not (Test-NetHasProperty -Object $sg -PropertyName 'IpPermissions')) { continue }
                     foreach ($rule in (Get-NetCliArray $sg.IpPermissions)) {
                         if (-not (Test-NetPermissionOpenToInternet -Permission $rule)) { continue }
                         $fromPort = 0
@@ -711,7 +713,7 @@ function Get-DomainChecks {
                         if ($rule.PSObject.Properties.Name -contains 'ToPort' -and $null -ne $rule.ToPort) {
                             $toPort = [int]$rule.ToPort
                         }
-                        $allProtocols = ((Test-NetHasProperty $rule 'IpProtocol') -and ($rule.IpProtocol -eq '-1'))
+                        $allProtocols = ((Test-NetHasProperty -Object $rule -PropertyName 'IpProtocol') -and ($rule.IpProtocol -eq '-1'))
                         if (($fromPort -le 22 -and $toPort -ge 22) -or ($fromPort -le 3389 -and $toPort -ge 3389) -or $allProtocols) {
                             $internetAdminExposure = $true
                             break
@@ -753,9 +755,9 @@ function Get-DomainChecks {
 
             $openGroups = @()
             foreach ($sg in $securityGroups) {
-                if (-not (Test-NetHasProperty $sg 'IpPermissions')) { continue }
+                if (-not (Test-NetHasProperty -Object $sg -PropertyName 'IpPermissions')) { continue }
                 foreach ($rule in (Get-NetCliArray $sg.IpPermissions)) {
-                    $allProtocols = ((Test-NetHasProperty $rule 'IpProtocol') -and ($rule.IpProtocol -eq '-1'))
+                    $allProtocols = ((Test-NetHasProperty -Object $rule -PropertyName 'IpProtocol') -and ($rule.IpProtocol -eq '-1'))
                     if ((Test-NetPermissionOpenToInternet -Permission $rule) -and $allProtocols) {
                         if ($openGroups.Count -lt 10) {
                             $openGroups += [string]$sg.GroupId
