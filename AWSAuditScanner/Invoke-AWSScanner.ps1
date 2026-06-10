@@ -39,14 +39,43 @@ if (-not $OutputPath) {
     $OutputPath = Join-Path $scriptRoot 'output'
 }
 
+function Get-SafeErrorMessage {
+    param(
+        $ErrorRecord,
+
+        [string]$Fallback = 'Unknown error'
+    )
+
+    if ($null -eq $ErrorRecord) {
+        return $Fallback
+    }
+
+    $message = [string]$ErrorRecord.Exception.Message
+    if (-not [string]::IsNullOrWhiteSpace($message)) {
+        return $message
+    }
+
+    $exceptionType = [string]$ErrorRecord.Exception.GetType().FullName
+    if (-not [string]::IsNullOrWhiteSpace($exceptionType)) {
+        return $exceptionType
+    }
+
+    return $Fallback
+}
+
 function Write-AuditLog {
     param(
         [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
         [string]$Message,
 
         [ValidateSet('INFO', 'WARN', 'ERROR')]
         [string]$Level = 'INFO'
     )
+
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $Message = '(no message)'
+    }
 
     $entry = '[{0}] [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
 
@@ -133,12 +162,17 @@ function Write-AuditDiagnostic {
         [string]$Type,
 
         [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
         [string]$Message,
 
         [string]$ExceptionType = '',
         [string]$StackTrace = '',
         [object[]]$FailedCommands = @()
     )
+
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $Message = '(no message)'
+    }
 
     if (-not $Script:DiagnosticFile) {
         return
@@ -242,6 +276,76 @@ function Write-AuditDiagnostic {
     Add-Content -Path $Script:DiagnosticFile -Value ($lines -join "`r`n") -Encoding UTF8
 }
 
+function ConvertTo-DeepPsObject {
+    param(
+        $InputObject
+    )
+
+    if ($null -eq $InputObject) {
+        return $null
+    }
+
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        $result = New-Object PSObject
+        foreach ($key in $InputObject.Keys) {
+            $noteKey = [string]$key
+            $noteValue = ConvertTo-DeepPsObject -InputObject $InputObject[$key]
+            $result | Add-Member -MemberType NoteProperty -Name $noteKey -Value $noteValue
+        }
+        return $result
+    }
+
+    if ($InputObject -is [System.Array]) {
+        $items = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($item in $InputObject) {
+            [void]$items.Add((ConvertTo-DeepPsObject -InputObject $item))
+        }
+        return @($items.ToArray())
+    }
+
+    if ($InputObject -is [System.Collections.IEnumerable] -and -not ($InputObject -is [string])) {
+        $items = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($item in $InputObject) {
+            [void]$items.Add((ConvertTo-DeepPsObject -InputObject $item))
+        }
+        return @($items.ToArray())
+    }
+
+    return $InputObject
+}
+
+function ConvertFrom-AwsCliJson {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$JsonText
+    )
+
+    if ([string]::IsNullOrWhiteSpace($JsonText)) {
+        return $null
+    }
+
+    try {
+        return ($JsonText | ConvertFrom-Json)
+    }
+    catch {
+        $primaryError = $_.Exception.Message
+    }
+
+    try {
+        if (-not ([System.Management.Automation.PSTypeName]'System.Web.Script.Serialization.JavaScriptSerializer').Type) {
+            Add-Type -AssemblyName System.Web.Extensions
+        }
+
+        $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+        $serializer.MaxJsonLength = 268435456
+        $deserialized = $serializer.DeserializeObject($JsonText)
+        return (ConvertTo-DeepPsObject -InputObject $deserialized)
+    }
+    catch {
+        throw (New-Object System.InvalidOperationException ("JSON parse failed: {0} | fallback: {1}" -f $primaryError, $_.Exception.Message))
+    }
+}
+
 function Invoke-AWSCLI {
     param(
         [Parameter(Mandatory = $true)]
@@ -273,27 +377,54 @@ function Invoke-AWSCLI {
     }
 
     if ($env:AWS_ACCESS_KEY_ID) {
-        $output = & aws @cliArgs 2>&1
+        $rawOutput = & aws @cliArgs 2>&1
     }
     else {
-        $output = & aws @cliArgs '--profile' $env:AWS_PROFILE 2>&1
+        $rawOutput = & aws @cliArgs '--profile' $env:AWS_PROFILE 2>&1
     }
 
     $exitCode = $LASTEXITCODE
-    $outputText = ($output | Out-String).Trim()
-    if ($outputText.Length -gt 4000) {
-        $outputText = $outputText.Substring(0, 4000) + '... [truncated]'
+
+    $stdoutParts = New-Object 'System.Collections.Generic.List[string]'
+    $stderrParts = New-Object 'System.Collections.Generic.List[string]'
+
+    if ($null -ne $rawOutput) {
+        foreach ($item in @($rawOutput)) {
+            if ($item -is [System.Management.Automation.ErrorRecord]) {
+                [void]$stderrParts.Add([string]$item)
+            }
+            else {
+                [void]$stdoutParts.Add([string]$item)
+            }
+        }
+    }
+
+    $outputText = ($stdoutParts -join [Environment]::NewLine).Trim()
+    $stderrText = ($stderrParts -join [Environment]::NewLine).Trim()
+
+    $logOutput = $outputText
+    if (-not [string]::IsNullOrWhiteSpace($stderrText)) {
+        if ([string]::IsNullOrWhiteSpace($logOutput)) {
+            $logOutput = $stderrText
+        }
+        else {
+            $logOutput = $stderrText + [Environment]::NewLine + $logOutput
+        }
+    }
+
+    if ($logOutput.Length -gt 4000) {
+        $logOutput = $logOutput.Substring(0, 4000) + '... [truncated]'
     }
 
     $logEntry = @{
         Command  = $commandString
         Success  = $false
         ExitCode = $exitCode
-        Output   = $outputText
+        Output   = $logOutput
     }
 
     if ($exitCode -ne 0) {
-        Add-AuditCliLogEntry -Command $commandString -Success $false -ExitCode $exitCode -Output $outputText
+        Add-AuditCliLogEntry -Command $commandString -Success $false -ExitCode $exitCode -Output $logOutput
         Write-AuditDiagnostic `
             -Type 'cli_failure' `
             -Message ('AWS CLI exited with code {0}' -f $exitCode) `
@@ -302,23 +433,37 @@ function Invoke-AWSCLI {
     }
 
     if ([string]::IsNullOrWhiteSpace($outputText)) {
-        Add-AuditCliLogEntry -Command $commandString -Success $false -ExitCode $exitCode -Output 'Empty response body'
+        $emptyMessage = 'Empty response body'
+        if (-not [string]::IsNullOrWhiteSpace($stderrText)) {
+            $emptyMessage = $stderrText
+        }
+
+        $logEntry.Output = $emptyMessage
+        Add-AuditCliLogEntry -Command $commandString -Success $false -ExitCode $exitCode -Output $logOutput
         Write-AuditDiagnostic `
             -Type 'cli_empty_response' `
-            -Message 'AWS CLI returned an empty response' `
+            -Message $emptyMessage `
             -FailedCommands @($logEntry)
         return $null
     }
 
     try {
-        $parsed = $outputText | ConvertFrom-Json
+        $parsed = ConvertFrom-AwsCliJson -JsonText $outputText
         Add-AuditCliLogEntry -Command $commandString -Success $true -ExitCode $exitCode -Output ''
         return $parsed
     }
     catch {
-        $jsonError = $_.Exception.Message
+        $jsonError = Get-SafeErrorMessage -ErrorRecord $_ -Fallback 'JSON parse failed'
+        if (-not [string]::IsNullOrWhiteSpace($stderrText)) {
+            $jsonError = $stderrText + ' | ' + $jsonError
+        }
+
         $logEntry.Output = $jsonError
-        Add-AuditCliLogEntry -Command $commandString -Success $false -ExitCode $exitCode -Output $jsonError
+        if ($logOutput.Length -gt 4000) {
+            $logEntry.Output = $logOutput
+        }
+
+        Add-AuditCliLogEntry -Command $commandString -Success $false -ExitCode $exitCode -Output $logEntry.Output
         Write-AuditDiagnostic `
             -Type 'cli_json_error' `
             -Message $jsonError `
@@ -819,7 +964,7 @@ function Get-SummaryRow {
     $partial = 0
     $notTested = 0
 
-    foreach ($item in $Results) {
+    foreach ($item in @($Results)) {
         switch ($item.Status) {
             'PASS'       { $passed++ }
             'FAIL'       { $failed++ }
@@ -1090,7 +1235,7 @@ try {
     $authMode = [string]$config.auth_mode
 }
 catch {
-    Write-AuditLog -Message $_.Exception.Message -Level WARN
+    Write-AuditLog -Message (Get-SafeErrorMessage -ErrorRecord $_ -Fallback 'Failed to load accounts config') -Level WARN
     Write-AuditLog -Message 'Falling back to AWS profile discovery from ~/.aws/config' -Level WARN
     $configSource = 'profiles'
     $authMode = 'sso_profile'
@@ -1222,7 +1367,8 @@ foreach ($account in $accounts) {
         -AccountId $account.id `
         -Auditor $Auditor
 
-    $accountEvidenceRecords = @()
+    $accountEvidenceRecords = New-Object 'System.Collections.Generic.List[object]'
+    $accountResults = New-Object 'System.Collections.Generic.List[object]'
 
     $sessionOk = Set-AccountSession `
         -AccountId $account.id `
@@ -1233,23 +1379,24 @@ foreach ($account in $accounts) {
     if (-not $sessionOk) {
         Write-AuditLog -Message "Could not establish session for $($account.name) ($($account.id))" -Level ERROR
 
-        $accountResults = @()
         foreach ($region in $account.regions) {
             foreach ($controlId in $domainChecks.Keys) {
-                $accountResults += New-AuditResult `
+                [void]$accountResults.Add((New-AuditResult `
                     -AccountId $account.id `
                     -AccountName $account.name `
                     -Region $region `
                     -ControlId $controlId `
                     -Status 'NOT_TESTED' `
                     -Evidence $null `
-                    -Notes 'Could not assume role for account'
+                    -Notes 'Could not assume role for account'))
             }
         }
 
-        foreach ($failedResult in $accountResults) {
-            $accountEvidenceRecords += New-AuditEvidenceRecord -Result $failedResult
+        foreach ($failedResult in @($accountResults)) {
+            [void]$accountEvidenceRecords.Add((New-AuditEvidenceRecord -Result $failedResult))
         }
+
+        $accountResultArray = @($accountResults.ToArray())
 
         Write-AccountResultsFile `
             -ResultsFile $accountPaths.ResultsFile `
@@ -1259,7 +1406,7 @@ foreach ($account in $accounts) {
             -Timestamp $timestamp `
             -Auditor $Auditor `
             -Account $account `
-            -Results $accountResults | Out-Null
+            -Results $accountResultArray | Out-Null
 
         Write-AccountEvidenceFile `
             -EvidenceFile $accountPaths.EvidenceFile `
@@ -1269,17 +1416,15 @@ foreach ($account in $accounts) {
             -Timestamp $timestamp `
             -Auditor $Auditor `
             -Account $account `
-            -EvidenceRecords $accountEvidenceRecords | Out-Null
+            -EvidenceRecords @($accountEvidenceRecords.ToArray()) | Out-Null
 
         $writtenAccountFolders += $accountPaths.AccountFolder
-        $allAccountResults[$account.name] = $accountResults
-        $summaryRows += Get-SummaryRow -AccountName $account.name -Results $accountResults
+        $allAccountResults[$account.name] = $accountResultArray
+        $summaryRows += Get-SummaryRow -AccountName $account.name -Results $accountResultArray
         Clear-AccountSession
         $Script:DiagnosticFile = $null
         continue
     }
-
-    $accountResults = @()
 
     foreach ($region in $account.regions) {
         Write-Host ('  Region: {0}' -f $region)
@@ -1303,8 +1448,8 @@ foreach ($account in $accounts) {
                     -Evidence $null `
                     -Notes 'Skipped by parameter'
 
-                $accountResults += $skippedResult
-                $accountEvidenceRecords += New-AuditEvidenceRecord -Result $skippedResult
+                [void]$accountResults.Add($skippedResult)
+                [void]$accountEvidenceRecords.Add((New-AuditEvidenceRecord -Result $skippedResult))
                 continue
             }
 
@@ -1325,13 +1470,15 @@ foreach ($account in $accounts) {
                     $stackTrace = $_.Exception.StackTrace
                 }
 
+                $exceptionMessage = Get-SafeErrorMessage -ErrorRecord $_ -Fallback 'Control execution failed'
+
                 Write-AuditDiagnostic `
                     -Type 'powershell_exception' `
-                    -Message $_.Exception.Message `
+                    -Message $exceptionMessage `
                     -ExceptionType $exceptionType `
                     -StackTrace $stackTrace
 
-                Write-AuditLog -Message "Control $controlId exception on $($account.name)/${region}: $($_.Exception.Message)" -Level ERROR
+                Write-AuditLog -Message "Control $controlId exception on $($account.name)/${region}: $exceptionMessage" -Level ERROR
 
                 $result = New-AuditResult `
                     -AccountId $account.id `
@@ -1340,7 +1487,7 @@ foreach ($account in $accounts) {
                     -ControlId $controlId `
                     -Status 'PARTIAL' `
                     -Evidence $null `
-                    -Notes ("Exception: {0}" -f $_.Exception.Message)
+                    -Notes ("Exception: {0}" -f $exceptionMessage)
             }
 
             if (-not $result) {
@@ -1354,8 +1501,8 @@ foreach ($account in $accounts) {
                     -Notes 'Check returned no result'
             }
 
-            $accountResults += $result
-            $accountEvidenceRecords += New-AuditEvidenceRecord -Result $result
+            [void]$accountResults.Add($result)
+            [void]$accountEvidenceRecords.Add((New-AuditEvidenceRecord -Result $result))
 
             if ($PSCmdlet.MyInvocation.BoundParameters.ContainsKey('Verbose')) {
                 Write-Host ('    {0}: {1}' -f $controlId, $result.Status)
@@ -1366,6 +1513,8 @@ foreach ($account in $accounts) {
     Clear-AccountSession
     $Script:DiagnosticFile = $null
 
+    $accountResultArray = @($accountResults.ToArray())
+
     Write-AccountResultsFile `
         -ResultsFile $accountPaths.ResultsFile `
         -AccountId $account.id `
@@ -1374,7 +1523,7 @@ foreach ($account in $accounts) {
         -Timestamp $timestamp `
         -Auditor $Auditor `
         -Account $account `
-        -Results $accountResults | Out-Null
+        -Results $accountResultArray | Out-Null
 
     Write-AccountEvidenceFile `
         -EvidenceFile $accountPaths.EvidenceFile `
@@ -1384,11 +1533,11 @@ foreach ($account in $accounts) {
         -Timestamp $timestamp `
         -Auditor $Auditor `
         -Account $account `
-        -EvidenceRecords $accountEvidenceRecords | Out-Null
+        -EvidenceRecords @($accountEvidenceRecords.ToArray()) | Out-Null
 
     $writtenAccountFolders += $accountPaths.AccountFolder
-    $allAccountResults[$account.name] = $accountResults
-    $summaryRows += Get-SummaryRow -AccountName $account.name -Results $accountResults
+    $allAccountResults[$account.name] = $accountResultArray
+    $summaryRows += Get-SummaryRow -AccountName $account.name -Results $accountResultArray
 }
 
 Write-Host ''

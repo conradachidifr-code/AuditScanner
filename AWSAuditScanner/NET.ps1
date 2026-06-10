@@ -38,31 +38,16 @@ function Get-NetCliArray {
         return @()
     }
 
-    if ($Items -is [string]) {
-        return ,$Items
+    # Generic.List[object] — call ToArray() explicitly to avoid ArgumentException under StrictMode PS 5.1
+    if ($Items -is [System.Collections.Generic.List[object]]) {
+        return $Items.ToArray()
     }
 
     if ($Items -is [System.Array]) {
-        return $Items
+        return @($Items)
     }
 
-    if ($Items.GetType().FullName -eq 'System.Management.Automation.PSCustomObject') {
-        return ,$Items
-    }
-
-    if ($Items -is [System.Collections.ICollection]) {
-        if ($Items.Count -eq 0) {
-            return @()
-        }
-
-        $result = New-Object 'System.Collections.Generic.List[object]'
-        foreach ($item in $Items) {
-            [void]$result.Add($item)
-        }
-        return $result.ToArray()
-    }
-
-    return ,$Items
+    return @($Items)
 }
 
 function Test-NetHasProperty {
@@ -78,21 +63,10 @@ function Test-NetHasProperty {
     }
 
     if ($Object -is [System.Collections.IDictionary]) {
-        foreach ($key in $Object.Keys) {
-            if ([string]$key -ieq $PropertyName) {
-                return $true
-            }
-        }
-        return $false
+        return $Object.Contains($PropertyName)
     }
 
-    foreach ($name in $Object.PSObject.Properties.Name) {
-        if ($name -ieq $PropertyName) {
-            return $true
-        }
-    }
-
-    return $false
+    return ($Object.PSObject.Properties.Name -contains $PropertyName)
 }
 
 function New-NetList {
@@ -108,61 +82,7 @@ function Get-NetCollectionCount {
         return 0
     }
 
-    if ($Items -is [string]) {
-        return 1
-    }
-
-    if ($Items -is [System.Collections.ICollection]) {
-        return $Items.Count
-    }
-
-    if ($Items.GetType().FullName -eq 'System.Management.Automation.PSCustomObject') {
-        return 1
-    }
-
-    if ($Items -is [System.Collections.IEnumerable]) {
-        $count = 0
-        foreach ($item in $Items) {
-            $count++
-        }
-        return $count
-    }
-
-    return 1
-}
-
-function Get-NetPropertyValue {
-    param(
-        $Object,
-
-        [Parameter(Mandatory = $true)]
-        [string[]]$PropertyNames
-    )
-
-    if ($null -eq $Object) {
-        return $null
-    }
-
-    if ($Object -is [System.Collections.IDictionary]) {
-        foreach ($propertyName in $PropertyNames) {
-            foreach ($key in $Object.Keys) {
-                if ([string]$key -ieq $propertyName) {
-                    return $Object[$key]
-                }
-            }
-        }
-        return $null
-    }
-
-    foreach ($propertyName in $PropertyNames) {
-        foreach ($prop in $Object.PSObject.Properties) {
-            if ($prop.Name -ieq $propertyName) {
-                return $prop.Value
-            }
-        }
-    }
-
-    return $null
+    return @((Get-NetCliArray $Items)).Length
 }
 
 function Get-NetRouteTables {
@@ -431,7 +351,6 @@ function Get-DomainChecks {
                 vpc_count = $vpcCount
                 vpcs      = @($vpcEvidence.ToArray())
             }
-
             if ($vpcCount -gt 1) {
                 return New-AuditResult `
                     -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'NET-02' `
@@ -499,7 +418,7 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                vpc_count     = @($vpcStats.Keys).Length
+                vpc_count     = ([array]@($vpcStats.Keys)).Count
                 passing_vpcs  = @($passingVpcs.ToArray())
                 failing_vpcs  = @($failingVpcs.ToArray())
             }
@@ -568,8 +487,8 @@ function Get-DomainChecks {
             $evidence = @{
                 route_table_count              = (Get-NetCollectionCount $routeTables)
                 igw_route_table_count          = $igwRouteTableCount
-                main_route_tables_with_igw     = @($mainTableWithIgw.ToArray())
-                subnet_associated_igw_tables   = @($subnetAssociatedIgwTables.ToArray())
+                main_route_tables_with_igw     = @($mainTableWithIgw)
+                subnet_associated_igw_tables   = @($subnetAssociatedIgwTables)
             }
 
             if ((Get-NetCollectionCount $mainTableWithIgw) -gt 0) {
@@ -612,7 +531,7 @@ function Get-DomainChecks {
             $igwCount = (Get-NetCollectionCount $igws)
             $evidence = @{
                 igw_count        = $igwCount
-                attached_vpc_ids = @($attachedVpcIds.ToArray())
+                attached_vpc_ids = @($attachedVpcIds)
             }
 
             if ($igwCount -le (Get-NetCollectionCount $attachedVpcIds)) {
@@ -658,7 +577,7 @@ function Get-DomainChecks {
             $evidence = @{
                 private_vpc_count = @($privateVpcIds.Keys).Length
                 nat_gateway_count   = Get-NetCollectionCount $natGateways
-                nat_vpc_ids         = @($natVpcIds.ToArray())
+                nat_vpc_ids         = @($natVpcIds)
             }
 
             if (@($privateVpcIds.Keys).Length -eq 0) {
@@ -770,7 +689,7 @@ function Get-DomainChecks {
             }
 
             $evidence = @{
-                offending_security_group_ids = @($offendingGroups.ToArray())
+                offending_security_group_ids = @($offendingGroups)
             }
 
             if ((Get-NetCollectionCount $offendingGroups) -gt 0) {
@@ -869,7 +788,7 @@ function Get-DomainChecks {
 
             $evidence = @{
                 security_group_count = (Get-NetCollectionCount $securityGroups)
-                open_all_traffic_sgs = @($openGroups.ToArray())
+                open_all_traffic_sgs = @($openGroups)
             }
 
             if ((Get-NetCollectionCount $openGroups) -gt 0) {
@@ -1294,9 +1213,9 @@ function Get-DomainChecks {
             if (Test-NetHasProperty -Object $data -PropertyName 'Resources') {
                 foreach ($resource in (Get-NetCliArray $data.Resources)) {
                     $resourceRecord = @{
-                        arn    = [string](Get-NetPropertyValue $resource -PropertyNames @('arn', 'Arn'))
-                        type   = [string](Get-NetPropertyValue $resource -PropertyNames @('type', 'Type', 'resourceType'))
-                        status = [string](Get-NetPropertyValue $resource -PropertyNames @('status', 'Status'))
+                        arn    = [string]$resource.Arn
+                        type   = [string]$resource.type
+                        status = [string]$resource.status
                     }
                     [void]$resources.Add($resourceRecord)
                 }
@@ -1370,9 +1289,12 @@ function Get-DomainChecks {
 
             if (Test-NetHasProperty -Object $data -PropertyName 'Rules') {
                 foreach ($rule in (Get-NetCliArray $data.Rules)) {
-                    $ruleName = [string](Get-NetPropertyValue $rule -PropertyNames @('Name', 'name'))
-                    $eventPattern = [string](Get-NetPropertyValue $rule -PropertyNames @('EventPattern', 'eventPattern'))
-                    if ((-not [string]::IsNullOrWhiteSpace($eventPattern) -and $eventPattern -match $networkPatterns) -or $ruleName -match 'Network|VPC|SecurityGroup|Route') {
+                    $ruleName = [string]$rule.Name
+                    $eventPattern = ''
+                    if (Test-NetHasProperty -Object $rule -PropertyName 'EventPattern') {
+                        $eventPattern = [string]$rule.EventPattern
+                    }
+                    if ($eventPattern -match $networkPatterns -or $ruleName -match 'Network|VPC|SecurityGroup|Route') {
                         [void]$matchingRules.Add($ruleName)
                     }
                 }
