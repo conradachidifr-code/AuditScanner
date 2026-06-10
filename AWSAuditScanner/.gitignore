@@ -1,5 +1,7 @@
 # Scan output
 AWSAuditScanner/output/
+anonymization-map*.json
+**/anonymization-map*.json
 
 # AWS / local secrets
 .env
