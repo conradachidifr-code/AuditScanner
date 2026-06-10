@@ -5,3 +5,4 @@ AWSAuditScanner/output/
 .env
 *.pem
 credentials
+NET.ps1_bkp.ps1
