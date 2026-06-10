@@ -5,8 +5,9 @@
 
 .DESCRIPTION
     Copies scan output (JSON results, evidence, diagnostics, session logs) to a new
-    folder with account names, IDs, profiles, ARNs, resource identifiers, auditor
-    identity, and local file paths removed or replaced with stable pseudonyms.
+    folder with AWS account IDs masked while account names are preserved (including
+    output folder names such as PROD-SEC_ACCT-001). Also redacts ARNs, resource
+    identifiers, auditor identity, and local file paths.
 
     The anonymized output preserves control IDs, statuses, severities, regions,
     evidence structure, and counts so an AI evaluator can assess audit quality
@@ -18,7 +19,7 @@
     remaining prefix-hex identifiers.
 
     IMPORTANT: Do not share the optional mapping file with the AI evaluator.
-    It is the only file that links pseudonyms back to real account names.
+    It is the only file that links masked account IDs back to real account IDs.
 
 .PARAMETER InputPath
     Source output folder (default: ./output).
@@ -79,19 +80,15 @@ if (-not $MappingFile) {
 }
 
 $Script:Anonymization = @{
-    AccountIdToPseudonym   = @{}
-    AccountNameToPseudonym = @{}
-    ProfileToPseudonym     = @{}
-    RoleArnToPseudonym     = @{}
-    ResourceCounters       = @{}
-    NextAccountIndex       = 1
+    AccountIdToPseudonym = @{}
+    RoleArnToPseudonym   = @{}
+    ResourceCounters     = @{}
+    NextAccountIndex     = 1
 }
 
 function Add-AnonymizationAccount {
     param(
         [string]$AccountId,
-        [string]$AccountName,
-        [string]$ProfileName,
         [string]$RoleArn
     )
 
@@ -100,19 +97,9 @@ function Add-AnonymizationAccount {
     }
 
     if (-not $Script:Anonymization.AccountIdToPseudonym.ContainsKey($AccountId)) {
-        $pseudonym = 'ACCOUNT-{0:D3}' -f $Script:Anonymization.NextAccountIndex
+        $pseudonym = 'ACCT-{0:D3}' -f $Script:Anonymization.NextAccountIndex
         $Script:Anonymization.NextAccountIndex++
         $Script:Anonymization.AccountIdToPseudonym[$AccountId] = $pseudonym
-    }
-
-    $accountPseudonym = $Script:Anonymization.AccountIdToPseudonym[$AccountId]
-
-    if (-not [string]::IsNullOrWhiteSpace($AccountName)) {
-        $Script:Anonymization.AccountNameToPseudonym[$AccountName] = $accountPseudonym
-    }
-
-    if (-not [string]::IsNullOrWhiteSpace($ProfileName)) {
-        $Script:Anonymization.ProfileToPseudonym[$ProfileName] = ('PROFILE-{0}' -f $accountPseudonym)
     }
 
     if (-not [string]::IsNullOrWhiteSpace($RoleArn)) {
@@ -138,14 +125,6 @@ function Initialize-AnonymizationMap {
 
         if ($config.accounts) {
             foreach ($account in $config.accounts) {
-                $profileName = ''
-                if ($account.PSObject.Properties.Name -contains 'profile') {
-                    $profileName = [string]$account.profile
-                }
-                elseif ($account.PSObject.Properties.Name -contains 'sso_profile') {
-                    $profileName = [string]$account.sso_profile
-                }
-
                 $roleArn = ''
                 if ($account.PSObject.Properties.Name -contains 'role_arn') {
                     $roleArn = [string]$account.role_arn
@@ -153,8 +132,6 @@ function Initialize-AnonymizationMap {
 
                 Add-AnonymizationAccount `
                     -AccountId ([string]$account.id) `
-                    -AccountName ([string]$account.name) `
-                    -ProfileName $profileName `
                     -RoleArn $roleArn
             }
         }
@@ -164,7 +141,7 @@ function Initialize-AnonymizationMap {
         $folderPattern = '^(.+)_(\d{12})$'
         foreach ($child in (Get-ChildItem -LiteralPath $SourcePath -Directory)) {
             if ($child.Name -match $folderPattern) {
-                Add-AnonymizationAccount -AccountId $Matches[2] -AccountName $Matches[1] -ProfileName $Matches[1]
+                Add-AnonymizationAccount -AccountId $Matches[2]
             }
         }
     }
@@ -280,14 +257,14 @@ function Protect-AwsGenericHyphenatedIds {
     )
 
     # Catch-all for service-prefix-hex IDs not covered above.
-    # Skips regions (e.g. eu-west-1), control IDs (NET-03), and pseudonyms (ACCOUNT-001).
+    # Skips regions (e.g. eu-west-1), control IDs (NET-03), and pseudonyms (ACCT-001).
     $pattern = '\b(?!(?:eu|us|ap|sa|ca|me|af|cn|il|mx)-)([a-z][a-z0-9]{1,22})-([0-9a-f]{8,32})\b'
     $result = $Text
 
     $guard = 0
     while ($result -match $pattern) {
         $prefix = $Matches[1]
-        if ($prefix -match '^(?:account|profile|redacted|log|kms|hostedzone)$' -or $prefix -match '^\d+$') {
+        if ($prefix -match '^(?:account|acct|profile|redacted|log|kms|hostedzone)$' -or $prefix -match '^\d+$') {
             $result = [regex]::Replace($result, $pattern, '[REDACTED-AWS-ID]', 1)
         }
         else {
@@ -471,18 +448,8 @@ function Protect-AuditText {
         $result = $result.Replace($accountId, $pseudonym)
     }
 
-    foreach ($accountName in @($Script:Anonymization.AccountNameToPseudonym.Keys | Sort-Object { $_.Length } -Descending)) {
-        $pseudonym = $Script:Anonymization.AccountNameToPseudonym[$accountName]
-        $result = $result.Replace($accountName, $pseudonym)
-    }
-
-    foreach ($profileName in @($Script:Anonymization.ProfileToPseudonym.Keys | Sort-Object { $_.Length } -Descending)) {
-        if (-not [string]::IsNullOrWhiteSpace($profileName)) {
-            $profilePseudonym = $Script:Anonymization.ProfileToPseudonym[$profileName]
-            $result = $result.Replace(('--profile ' + $profileName), ('--profile ' + $profilePseudonym))
-            $result = $result.Replace(('--profile ' + $profileName + ' '), ('--profile ' + $profilePseudonym + ' '))
-        }
-    }
+    # Mask any remaining 12-digit AWS account IDs not present in accounts.json.
+    $result = [regex]::Replace($result, '\b\d{12}\b', '[REDACTED-ACCOUNT-ID]')
 
     $result = [regex]::Replace(
         $result,
@@ -548,13 +515,13 @@ function Get-AnonymizedRelativePath {
 
     foreach ($segment in $segments) {
         if ($segment -match '^(.+)_(\d{12})$') {
+            $accountName = $Matches[1]
             $accountId = $Matches[2]
+            $idPseudonym = '[REDACTED-ACCOUNT-ID]'
             if ($Script:Anonymization.AccountIdToPseudonym.ContainsKey($accountId)) {
-                $mapped += $Script:Anonymization.AccountIdToPseudonym[$accountId]
+                $idPseudonym = $Script:Anonymization.AccountIdToPseudonym[$accountId]
             }
-            else {
-                $mapped += ('ACCOUNT-UNKNOWN')
-            }
+            $mapped += ('{0}_{1}' -f $accountName, $idPseudonym)
         }
         else {
             $mapped += (Protect-AuditText -Text $segment)
@@ -567,37 +534,43 @@ function Get-AnonymizedRelativePath {
 function Write-AnonymizationMap {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Path
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AccountsConfigPath
     )
 
     $export = [ordered]@{
         generated_at = (Get-Date).ToString('o')
-        warning    = 'INTERNAL ONLY - do not share with AI audit evaluator'
+        warning    = 'INTERNAL ONLY - maps masked account IDs back to real IDs. Account names are not masked in output.'
         accounts   = @()
-        profiles   = @()
     }
 
-    foreach ($accountId in @($Script:Anonymization.AccountIdToPseudonym.Keys | Sort-Object)) {
-        $pseudonym = $Script:Anonymization.AccountIdToPseudonym[$accountId]
-        $realName = ''
-        foreach ($pair in $Script:Anonymization.AccountNameToPseudonym.GetEnumerator()) {
-            if ($pair.Value -eq $pseudonym) {
-                $realName = $pair.Key
-                break
+    if (Test-Path -LiteralPath $AccountsConfigPath) {
+        $config = Get-Content -LiteralPath $AccountsConfigPath -Raw | ConvertFrom-Json
+        if ($config.accounts) {
+            foreach ($account in $config.accounts) {
+                $accountId = [string]$account.id
+                $pseudonym = ''
+                if ($Script:Anonymization.AccountIdToPseudonym.ContainsKey($accountId)) {
+                    $pseudonym = $Script:Anonymization.AccountIdToPseudonym[$accountId]
+                }
+
+                $export.accounts += [ordered]@{
+                    account_name      = [string]$account.name
+                    masked_account_id = $pseudonym
+                    real_account_id   = $accountId
+                }
             }
         }
-
-        $export.accounts += [ordered]@{
-            pseudonym    = $pseudonym
-            account_id   = $accountId
-            account_name = $realName
-        }
     }
-
-    foreach ($profileName in @($Script:Anonymization.ProfileToPseudonym.Keys | Sort-Object)) {
-        $export.profiles += [ordered]@{
-            profile   = $profileName
-            pseudonym = $Script:Anonymization.ProfileToPseudonym[$profileName]
+    else {
+        foreach ($accountId in @($Script:Anonymization.AccountIdToPseudonym.Keys | Sort-Object)) {
+            $export.accounts += [ordered]@{
+                account_name      = ''
+                masked_account_id = $Script:Anonymization.AccountIdToPseudonym[$accountId]
+                real_account_id   = $accountId
+            }
         }
     }
 
@@ -659,7 +632,7 @@ foreach ($file in $files) {
     $processedCount++
 }
 
-Write-AnonymizationMap -Path $MappingFile
+Write-AnonymizationMap -Path $MappingFile -AccountsConfigPath $ConfigFile
 
 Write-Host '===================================='
 Write-Host 'Audit output anonymized'
@@ -670,5 +643,5 @@ Write-Host ('Accounts    : {0}' -f $Script:Anonymization.AccountIdToPseudonym.Co
 Write-Host ('Mapping     : {0}' -f $MappingFile)
 Write-Host ''
 Write-Host 'Share only the anonymized folder with the AI evaluator.'
-Write-Host 'Keep the mapping file internal - it reverses the pseudonyms.'
+Write-Host 'Keep the mapping file internal - it reverses masked account IDs.'
 Write-Host '===================================='
