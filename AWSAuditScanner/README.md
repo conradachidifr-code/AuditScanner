@@ -1,6 +1,6 @@
 # AWS Audit Scanner
 
-PowerShell 5.1 tool that runs AWS security control checks by domain across multiple accounts. Each check calls the AWS CLI and writes structured JSON results.
+PowerShell 5.1 and Python scanners that run AWS security control checks by domain across multiple accounts. Each check calls the AWS CLI and writes structured JSON results.
 
 ## Project structure
 
@@ -8,10 +8,17 @@ Repository layout (committed to git):
 
 ```
 AWSAuditScanner/
-├── Invoke-AWSScanner.ps1    # Main scanner script
+├── scan.py                  # Python scanner (phase 1 domains)
+├── protect_audit_output.py  # Python output anonymizer
+├── requirements.txt
+├── Invoke-AWSScanner.ps1    # PowerShell scanner (all domains)
 ├── accounts.json            # Target accounts and SSO profiles
 ├── README.md
 ├── .gitignore               # Ignores output/
+├── audit_scanner/           # Python package
+│   ├── scanner.py
+│   ├── domains/             # DET, INC, NET, IAM, CIC, WRK
+│   └── ...
 └── domains/
     ├── LOG.ps1
     ├── IAM.ps1
@@ -44,7 +51,55 @@ output/
 
 ---
 
-## English
+## Python scanner (recommended for phase-1 domains)
+
+### Prerequisites
+
+1. **Python 3.11+** (tested with 3.14)
+2. **AWS CLI v2** on your `PATH`
+3. Same SSO setup as the PowerShell scanner (`accounts.json`, `aws sso login`)
+
+### Install and run
+
+```bash
+cd AWSAuditScanner
+pip install -r requirements.txt
+aws sso login --profile PROD-SEC
+python scan.py --domain NET --auditor "Jane Doe"
+```
+
+**Python domains available:** `DET`, `INC`, `NET`, `IAM`, `CIC`, `WRK`  
+Other domains (`LOG`, `DAT`, `GOV`, `ORG`, `BCK`) still use `Invoke-AWSScanner.ps1`.
+
+### Python options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--domain` | *(required)* | Domain code |
+| `--auditor` | OS username | Auditor name in metadata |
+| `--config-file` | `accounts.json` | Account configuration |
+| `--output-path` | `./output` | Output directory |
+| `--dry-run` | off | Test SSO connectivity only |
+| `--skip-controls` | none | Comma-separated control IDs |
+| `--verbose` | off | Print each control status |
+| `--sequential` | off | Disable parallel account scanning |
+| `--workers` | CPU count | Max parallel account workers |
+
+Parallel account scanning runs one process per account (safe for per-account `AWS_PROFILE`).
+
+An **HTML summary report** is written to `output/AuditReport_{Domain}_{timestamp}.html`.
+
+### Anonymize output (Python)
+
+```bash
+python protect_audit_output.py --force
+```
+
+Same behavior as `Protect-AuditOutput.ps1`: masks account IDs, keeps account names, redacts resource identifiers.
+
+---
+
+## English (PowerShell)
 
 ### Prerequisites
 

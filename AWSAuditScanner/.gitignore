@@ -10,3 +10,8 @@ credentials
 NET.ps1_bkp.ps1
 AWSAuditScanner.zip
 AuditDiagnostics_*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
