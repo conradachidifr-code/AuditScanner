@@ -35,7 +35,7 @@ function Get-DatS3BucketNames {
 
     $bucketNames = @()
     if (Test-AuditHasProperty -Object $data -PropertyName 'Buckets') {
-        foreach ($bucket in (Get-AuditCliArray $data.$Buckets)) {
+        foreach ($bucket in (Get-AuditCliArray $data.Buckets)) {
             if (Test-AuditHasProperty -Object $bucket -PropertyName 'Name') {
                 $bucketNames += [string]$bucket.Name
             }
@@ -85,7 +85,7 @@ function Test-DatS3BucketPublic {
     $aclData = Invoke-AWSCLI -Arguments @('s3api', 'get-bucket-acl', '--bucket', $BucketName) -Region $Region
     if ($null -ne $aclData) {
         if (Test-AuditHasProperty -Object $aclData -PropertyName 'Grants') {
-            foreach ($grant in (Get-AuditCliArray $aclData.$Grants)) {
+            foreach ($grant in (Get-AuditCliArray $aclData.Grants)) {
                 if ($grant.Grantee -and $grant.Grantee.URI) {
                     $uri = [string]$grant.Grantee.URI
                     if ($uri -match 'AllUsers|AuthenticatedUsers') {
@@ -170,7 +170,7 @@ function Get-DatCustomerMasterKeys {
         }
 
         if (Test-AuditHasProperty -Object $listData -PropertyName 'Keys') {
-            foreach ($key in (Get-AuditCliArray $listData.$Keys)) {
+            foreach ($key in (Get-AuditCliArray $listData.Keys)) {
                 if (-not (Test-AuditHasProperty -Object $key -PropertyName 'KeyId')) {
                     continue
                 }
@@ -283,7 +283,7 @@ function Get-DomainChecks {
             $ebsEncrypted = 0
             $ebsUnencrypted = 0
             if (Test-AuditHasProperty -Object $volumeData -PropertyName 'Volumes') {
-                foreach ($volume in (Get-AuditCliArray $volumeData.$Volumes)) {
+                foreach ($volume in (Get-AuditCliArray $volumeData.Volumes)) {
                     $ebsTotal++
                     if ($volume.Encrypted -eq $true) {
                         $ebsEncrypted++
@@ -303,7 +303,7 @@ function Get-DomainChecks {
             $rdsEncrypted = 0
             $rdsUnencrypted = 0
             if (Test-AuditHasProperty -Object $rdsData -PropertyName 'DBInstances') {
-                foreach ($instance in (Get-AuditCliArray $rdsData.$DBInstances)) {
+                foreach ($instance in (Get-AuditCliArray $rdsData.DBInstances)) {
                     $rdsTotal++
                     if ($instance.StorageEncrypted -eq $true) {
                         $rdsEncrypted++
@@ -451,7 +451,7 @@ function Get-DomainChecks {
                     continue
                 }
 
-                foreach ($listener in (Get-AuditCliArray $listenerData.$Listeners)) {
+                foreach ($listener in (Get-AuditCliArray $listenerData.Listeners)) {
                     $protocol = [string]$listener.Protocol
                     if ($protocol -eq 'HTTPS') {
                         $httpsListenerCount++
@@ -462,7 +462,7 @@ function Get-DomainChecks {
                         $httpListenerCount++
                         $hasRedirect = $false
                         if (Test-AuditHasProperty -Object $listener -PropertyName 'DefaultActions') {
-                            foreach ($action in (Get-AuditCliArray $listener.$DefaultActions)) {
+                            foreach ($action in (Get-AuditCliArray $listener.DefaultActions)) {
                                 if ($action.Type -eq 'redirect') {
                                     $hasRedirect = $true
                                     break
@@ -727,7 +727,7 @@ function Get-DomainChecks {
                     continue
                 }
 
-                foreach ($grant in (Get-AuditCliArray $grantData.$Grants)) {
+                foreach ($grant in (Get-AuditCliArray $grantData.Grants)) {
                     $totalGrantCount++
                     $grantee = [string]$grant.GranteePrincipal
                     if ([string]::IsNullOrWhiteSpace($grantee)) {
@@ -1176,7 +1176,7 @@ function Get-DomainChecks {
                 }
 
                 if (Test-AuditHasProperty -Object $attributeData -PropertyName 'CreateVolumePermissions') {
-                    foreach ($permission in (Get-AuditCliArray $attributeData.$CreateVolumePermissions)) {
+                    foreach ($permission in (Get-AuditCliArray $attributeData.CreateVolumePermissions)) {
                         if ($permission.Group -eq 'all') {
                             $publicShareCount++
                             if ((Get-AuditCollectionCount $failingSnapshots) -lt 10) {
@@ -1307,7 +1307,7 @@ function Get-DomainChecks {
 
             $vaultNames = @()
             if (Test-AuditHasProperty -Object $vaultData -PropertyName 'BackupVaultList') {
-                foreach ($vault in (Get-AuditCliArray $vaultData.$BackupVaultList)) {
+                foreach ($vault in (Get-AuditCliArray $vaultData.BackupVaultList)) {
                     if (Test-AuditHasProperty -Object $vault -PropertyName 'BackupVaultName') {
                         $vaultNames += [string]$vault.BackupVaultName
                     }
@@ -1433,7 +1433,7 @@ function Get-DomainChecks {
             $stringParamCount = 0
             $secureStringCount = 0
             if (Test-AuditHasProperty -Object $ssmData -PropertyName 'Parameters') {
-                foreach ($parameter in (Get-AuditCliArray $ssmData.$Parameters)) {
+                foreach ($parameter in (Get-AuditCliArray $ssmData.Parameters)) {
                     $paramType = [string]$parameter.Type
                     if ($paramType -eq 'String') {
                         $stringParamCount++

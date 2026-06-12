@@ -104,7 +104,7 @@ function Get-IncScpPolicyDocuments {
         return @()
     }
 
-    foreach ($policy in (Get-AuditCliArray $listData.$Policies)) {
+    foreach ($policy in (Get-AuditCliArray $listData.Policies)) {
         if (-not (Test-AuditHasProperty -Object $policy -PropertyName 'Id')) {
             continue
         }
@@ -181,7 +181,7 @@ function Get-DomainChecks {
             $configRules = @()
 
             if (Test-AuditHasProperty -Object $data -PropertyName 'Rules') {
-                foreach ($rule in (Get-AuditCliArray $data.$Rules)) {
+                foreach ($rule in (Get-AuditCliArray $data.Rules)) {
                     $ruleName = [string]$rule.Name
                     $eventPattern = [string]$rule.EventPattern
                     $combined = ($ruleName + ' ' + $eventPattern)
@@ -300,7 +300,7 @@ function Get-DomainChecks {
             $isolationGroups = @()
 
             if ($sgData -and $sgData.SecurityGroups) {
-                foreach ($sg in (Get-AuditCliArray $sgData.$SecurityGroups)) {
+                foreach ($sg in (Get-AuditCliArray $sgData.SecurityGroups)) {
                     $groupName = [string]$sg.GroupName
                     $description = [string]$sg.Description
                     $combined = ($groupName + ' ' + $description).ToLower()
@@ -365,7 +365,7 @@ function Get-DomainChecks {
 
             $forensicsBuckets = @()
             if (Test-AuditHasProperty -Object $data -PropertyName 'Buckets') {
-                foreach ($bucket in (Get-AuditCliArray $data.$Buckets)) {
+                foreach ($bucket in (Get-AuditCliArray $data.Buckets)) {
                     $bucketName = [string]$bucket.Name
                     $lowerName = $bucketName.ToLower()
                     if ($lowerName -match 'forensic|forensics|evidence|chain-of-custody|incident') {
@@ -447,7 +447,7 @@ function Get-DomainChecks {
 
             if (Test-AuditHasProperty -Object $data -PropertyName 'Events') {
                 $assumeRoleCount = (Get-AuditCollectionCount $data.Events)
-                foreach ($event in (Get-AuditCliArray $data.$Events)) {
+                foreach ($event in (Get-AuditCliArray $data.Events)) {
                     $eventText = [string]$event.CloudTrailEvent
                     if ($eventText -match 'BreakGlass|Emergency|Incident|Quarantine') {
                         $breakGlassCount++

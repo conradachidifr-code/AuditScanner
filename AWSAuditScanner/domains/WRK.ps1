@@ -67,7 +67,7 @@ function Get-WrkTaggedResourceSummary {
         $arn = [string]$resource.ResourceARN
         if ($arn -match 'arn:aws:([^:]+):') {
             $service = $Matches[1]
-            if (-not (Test-AuditHasProperty -Object $serviceTypes -PropertyName 'ContainsKey')($service)) {
+            if (-not $serviceTypes.ContainsKey($service)) {
                 $serviceTypes[$service] = 0
             }
             $serviceTypes[$service] = $serviceTypes[$service] + 1
@@ -93,7 +93,7 @@ function Get-WrkSsmStringParameterCount {
 
     $stringCount = 0
     if (Test-AuditHasProperty -Object $data -PropertyName 'Parameters') {
-        foreach ($parameter in (Get-AuditCliArray $data.$Parameters)) {
+        foreach ($parameter in (Get-AuditCliArray $data.Parameters)) {
             if ([string]$parameter.Type -eq 'String') {
                 $stringCount++
             }
@@ -116,13 +116,13 @@ function Get-WrkActiveAccessKeyCount {
 
     $activeKeyCount = 0
     if (Test-AuditHasProperty -Object $userData -PropertyName 'Users') {
-        foreach ($user in (Get-AuditCliArray $userData.$Users)) {
+        foreach ($user in (Get-AuditCliArray $userData.Users)) {
             $keyData = Invoke-AWSCLI -Arguments @('iam', 'list-access-keys', '--user-name', $user.UserName) -Region $Region
             if ($null -eq $keyData -or -not (Test-AuditHasProperty -Object $keyData -PropertyName 'AccessKeyMetadata')) {
                 continue
             }
 
-            foreach ($key in (Get-AuditCliArray $keyData.$AccessKeyMetadata)) {
+            foreach ($key in (Get-AuditCliArray $keyData.AccessKeyMetadata)) {
                 if ($key.Status -eq 'Active') {
                     $activeKeyCount++
                 }
@@ -219,7 +219,7 @@ function Get-DomainChecks {
             $roleCount = 0
             if (Test-AuditHasProperty -Object $data -PropertyName 'Roles') {
                 $roleCount = (Get-AuditCollectionCount $data.Roles)
-                foreach ($role in (Get-AuditCliArray $data.$Roles)) {
+                foreach ($role in (Get-AuditCliArray $data.Roles)) {
                     $roleName = [string]$role.RoleName
                     if ($roleName -match 'workload|app|svc|service|lambda|ecs|eks') {
                         if ((Get-AuditCollectionCount $workloadRoles) -lt 10) {
@@ -281,7 +281,7 @@ function Get-DomainChecks {
             $publicDbs = @()
 
             if (Test-AuditHasProperty -Object $rdsData -PropertyName 'DBInstances') {
-                foreach ($instance in (Get-AuditCliArray $rdsData.$DBInstances)) {
+                foreach ($instance in (Get-AuditCliArray $rdsData.DBInstances)) {
                     if ($instance.PubliclyAccessible -eq $true) {
                         $publicDbCount++
                         if ((Get-AuditCollectionCount $publicDbs) -lt 5) {
@@ -297,7 +297,7 @@ function Get-DomainChecks {
             $openSearchPublicCount = 0
             $domainData = Invoke-AWSCLI -Arguments @('opensearch', 'list-domain-names') -Region $Region
             if ($domainData -and $domainData.DomainNames) {
-                foreach ($domainEntry in (Get-AuditCliArray $domainData.$DomainNames)) {
+                foreach ($domainEntry in (Get-AuditCliArray $domainData.DomainNames)) {
                     $domainName = [string]$domainEntry.DomainName
                     $describeData = Invoke-AWSCLI -Arguments @('opensearch', 'describe-domain', '--domain-name', $domainName) -Region $Region
                     if ($null -eq $describeData -or -not (Test-AuditHasProperty -Object $describeData -PropertyName 'DomainStatus')) {
@@ -541,7 +541,7 @@ function Get-DomainChecks {
                     $runtime = [string]$function.Runtime
                 }
 
-                if (-not (Test-AuditHasProperty -Object $runtimeSummary -PropertyName 'ContainsKey')($runtime)) {
+                if (-not $runtimeSummary.ContainsKey($runtime)) {
                     $runtimeSummary[$runtime] = 0
                 }
                 $runtimeSummary[$runtime] = $runtimeSummary[$runtime] + 1
@@ -783,7 +783,7 @@ function Get-DomainChecks {
                 if ($describeData.cluster.logging -and $describeData.cluster.logging.clusterLogging) {
                     foreach ($logEntry in $describeData.cluster.logging.clusterLogging) {
                         if ($logEntry.enabled -eq $true -and $logEntry.types) {
-                            foreach ($logType in (Get-AuditCliArray $logEntry.$types)) {
+                            foreach ($logType in (Get-AuditCliArray $logEntry.types)) {
                                 if ($enabledTypes -notcontains $logType) {
                                     $enabledTypes += [string]$logType
                                 }
@@ -839,7 +839,7 @@ function Get-DomainChecks {
             $publicInstances = @()
 
             if (Test-AuditHasProperty -Object $rdsData -PropertyName 'DBInstances') {
-                foreach ($instance in (Get-AuditCliArray $rdsData.$DBInstances)) {
+                foreach ($instance in (Get-AuditCliArray $rdsData.DBInstances)) {
                     if ($instance.PubliclyAccessible -eq $true) {
                         $publicCount++
                         if ((Get-AuditCollectionCount $publicInstances) -lt 5) {
@@ -885,7 +885,7 @@ function Get-DomainChecks {
 
             $sqsData = Invoke-AWSCLI -Arguments @('sqs', 'list-queues') -Region $Region
             if ($sqsData -and $sqsData.QueueUrls) {
-                foreach ($queueUrl in (Get-AuditCliArray $sqsData.$QueueUrls)) {
+                foreach ($queueUrl in (Get-AuditCliArray $sqsData.QueueUrls)) {
                     $queueCount++
                     $attrData = Invoke-AWSCLI -Arguments @('sqs', 'get-queue-attributes', '--queue-url', $queueUrl, '--attribute-names', 'Policy') -Region $Region
                     if ($attrData -and $attrData.Attributes -and $attrData.Attributes.Policy) {
@@ -898,7 +898,7 @@ function Get-DomainChecks {
 
             $snsData = Invoke-AWSCLI -Arguments @('sns', 'list-topics') -Region $Region
             if ($snsData -and $snsData.Topics) {
-                foreach ($topic in (Get-AuditCliArray $snsData.$Topics)) {
+                foreach ($topic in (Get-AuditCliArray $snsData.Topics)) {
                     if (-not (Test-AuditHasProperty -Object $topic -PropertyName 'TopicArn')) {
                         continue
                     }
@@ -945,7 +945,7 @@ function Get-DomainChecks {
 
             $sqsData = Invoke-AWSCLI -Arguments @('sqs', 'list-queues') -Region $Region
             if ($sqsData -and $sqsData.QueueUrls) {
-                foreach ($queueUrl in (Get-AuditCliArray $sqsData.$QueueUrls)) {
+                foreach ($queueUrl in (Get-AuditCliArray $sqsData.QueueUrls)) {
                     $attrData = Invoke-AWSCLI -Arguments @(
                         'sqs', 'get-queue-attributes', '--queue-url', $queueUrl,
                         '--attribute-names', 'KmsMasterKeyId', 'SqsManagedSseEnabled'
@@ -972,7 +972,7 @@ function Get-DomainChecks {
 
             $snsData = Invoke-AWSCLI -Arguments @('sns', 'list-topics') -Region $Region
             if ($snsData -and $snsData.Topics) {
-                foreach ($topic in (Get-AuditCliArray $snsData.$Topics)) {
+                foreach ($topic in (Get-AuditCliArray $snsData.Topics)) {
                     if (-not (Test-AuditHasProperty -Object $topic -PropertyName 'TopicArn')) {
                         continue
                     }
@@ -1055,7 +1055,7 @@ function Get-DomainChecks {
                     continue
                 }
 
-                foreach ($resource in (Get-AuditCliArray $resourceData.$items)) {
+                foreach ($resource in (Get-AuditCliArray $resourceData.items)) {
                     if (-not (Test-AuditHasProperty -Object $resource -PropertyName 'resourceMethods')) {
                         continue
                     }
@@ -1125,7 +1125,7 @@ function Get-DomainChecks {
                     continue
                 }
 
-                foreach ($stage in (Get-AuditCliArray $stageData.$item)) {
+                foreach ($stage in (Get-AuditCliArray $stageData.item)) {
                     $stageCount++
                     $hasThrottling = $false
 

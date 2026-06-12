@@ -244,7 +244,7 @@ function Get-LogCisMetricFilterAssessment {
 
     $filterPatterns = @()
     if (Test-AuditHasProperty -Object $filterData -PropertyName 'metricFilters') {
-        foreach ($filter in (Get-AuditCliArray $filterData.$metricFilters)) {
+        foreach ($filter in (Get-AuditCliArray $filterData.metricFilters)) {
             if (Test-AuditHasProperty -Object $filter -PropertyName 'filterPattern') {
                 $filterPatterns += [string]$filter.filterPattern
             }
@@ -398,7 +398,7 @@ function Get-DomainChecks {
             $passFound = $false
             $selectorEvidence = @()
             if (Test-AuditHasProperty -Object $selectorData -PropertyName 'EventSelectors') {
-                foreach ($selector in (Get-AuditCliArray $selectorData.$EventSelectors)) {
+                foreach ($selector in (Get-AuditCliArray $selectorData.EventSelectors)) {
                     $readWriteType = [string]$selector.ReadWriteType
                     $includeManagement = ($selector.IncludeManagementEvents -eq $true)
                     $selectorEvidence += @{
@@ -455,9 +455,9 @@ function Get-DomainChecks {
 
             $s3DataResources = @()
             if (Test-AuditHasProperty -Object $selectorData -PropertyName 'EventSelectors') {
-                foreach ($selector in (Get-AuditCliArray $selectorData.$EventSelectors)) {
+                foreach ($selector in (Get-AuditCliArray $selectorData.EventSelectors)) {
                     if (Test-AuditHasProperty -Object $selector -PropertyName 'DataResources') {
-                        foreach ($resource in (Get-AuditCliArray $selector.$DataResources)) {
+                        foreach ($resource in (Get-AuditCliArray $selector.DataResources)) {
                             if ([string]$resource.Type -eq 'AWS::S3::Object') {
                                 $values = @()
                                 if (Test-AuditHasProperty -Object $resource -PropertyName 'Values') {
@@ -727,7 +727,7 @@ function Get-DomainChecks {
             $flowLogGroups = @()
 
             if (Test-AuditHasProperty -Object $data -PropertyName 'logGroups') {
-                foreach ($logGroup in (Get-AuditCliArray $data.$logGroups)) {
+                foreach ($logGroup in (Get-AuditCliArray $data.logGroups)) {
                     $name = [string]$logGroup.logGroupName
                     $lowerName = $name.ToLower()
                     if ($lowerName -match 'cloudtrail|aws-cloudtrail') {
@@ -933,7 +933,7 @@ function Get-DomainChecks {
 
                 $enabled = $false
                 if (Test-AuditHasProperty -Object $attrData -PropertyName 'Attributes') {
-                    foreach ($attribute in (Get-AuditCliArray $attrData.$Attributes)) {
+                    foreach ($attribute in (Get-AuditCliArray $attrData.Attributes)) {
                         if ($attribute.Key -eq 'access_logs.s3.enabled' -and $attribute.Value -eq 'true') {
                             $enabled = $true
                             break
@@ -983,7 +983,7 @@ function Get-DomainChecks {
             $matchingAlarms = @()
 
             if ($rulesData -and $rulesData.Rules) {
-                foreach ($rule in (Get-AuditCliArray $rulesData.$Rules)) {
+                foreach ($rule in (Get-AuditCliArray $rulesData.Rules)) {
                     $ruleName = [string]$rule.Name
                     $eventPattern = [string]$rule.EventPattern
                     if ($eventPattern -match $iamPatterns -or $ruleName -match 'IAM|Root|ConsoleLogin') {
@@ -993,7 +993,7 @@ function Get-DomainChecks {
             }
 
             if ($alarmsData -and $alarmsData.MetricAlarms) {
-                foreach ($alarm in (Get-AuditCliArray $alarmsData.$MetricAlarms)) {
+                foreach ($alarm in (Get-AuditCliArray $alarmsData.MetricAlarms)) {
                     $alarmName = [string]$alarm.AlarmName
                     if ($alarmName -match 'IAM|Root|ConsoleLogin|CreateUser|DeleteUser|CreateAccessKey') {
                         $matchingAlarms += $alarmName
@@ -1036,7 +1036,7 @@ function Get-DomainChecks {
             if (-not $logGroupName) {
                 $logGroupData = Invoke-AWSCLI -Arguments @('logs', 'describe-log-groups') -Region $Region
                 if ($logGroupData -and $logGroupData.logGroups) {
-                    foreach ($logGroup in (Get-AuditCliArray $logGroupData.$logGroups)) {
+                    foreach ($logGroup in (Get-AuditCliArray $logGroupData.logGroups)) {
                         $name = [string]$logGroup.logGroupName
                         if ($name -match 'CloudTrail|cloudtrail') {
                             $logGroupName = $name
@@ -1201,7 +1201,7 @@ function Get-DomainChecks {
 
             $matchingEvents = 0
             if ($data.Events -and $logBucketName) {
-                foreach ($event in (Get-AuditCliArray $data.$Events)) {
+                foreach ($event in (Get-AuditCliArray $data.Events)) {
                     $eventJson = [string]$event.CloudTrailEvent
                     if ($eventJson -match [regex]::Escape($logBucketName)) {
                         $matchingEvents++

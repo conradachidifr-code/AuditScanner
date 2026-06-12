@@ -199,7 +199,7 @@ function Test-OrgRoleAttachedPolicyMatch {
         return $false
     }
 
-    foreach ($policy in (Get-AuditCliArray $data.$AttachedPolicies)) {
+    foreach ($policy in (Get-AuditCliArray $data.AttachedPolicies)) {
         $policyName = [string]$policy.PolicyName
         $policyArn = [string]$policy.PolicyArn
 
@@ -249,7 +249,7 @@ function Get-DomainChecks {
             $denyStatementCount = 0
             $matchingPolicyNames = @()
 
-            foreach ($document in (Get-AuditCliArray $scpData.$Documents)) {
+            foreach ($document in (Get-AuditCliArray $scpData.Documents)) {
                 if (-not (Test-AuditHasProperty -Object $document -PropertyName 'IsReadable')) {
                     continue
                 }
@@ -326,7 +326,7 @@ function Get-DomainChecks {
 
             $denyActionsFound = @()
 
-            foreach ($document in (Get-AuditCliArray $scpData.$Documents)) {
+            foreach ($document in (Get-AuditCliArray $scpData.Documents)) {
                 if (-not (Test-AuditHasProperty -Object $document -PropertyName 'IsReadable')) {
                     continue
                 }
@@ -415,7 +415,7 @@ function Get-DomainChecks {
             $matchedPolicyNames = @()
             $regionValues = @()
 
-            foreach ($document in (Get-AuditCliArray $scpData.$Documents)) {
+            foreach ($document in (Get-AuditCliArray $scpData.Documents)) {
                 if (-not (Test-AuditHasProperty -Object $document -PropertyName 'IsReadable')) {
                     continue
                 }
@@ -514,7 +514,7 @@ function Get-DomainChecks {
 
             $guardDutyAdminAccounts = @()
             if ($guardDutyData -and $guardDutyData.AdminAccounts) {
-                foreach ($adminAccount in (Get-AuditCliArray $guardDutyData.$AdminAccounts)) {
+                foreach ($adminAccount in (Get-AuditCliArray $guardDutyData.AdminAccounts)) {
                     $guardDutyAdminAccounts += @{
                         account_id   = [string]$adminAccount.AccountId
                         admin_status = [string]$adminAccount.AdminStatus
@@ -524,7 +524,7 @@ function Get-DomainChecks {
 
             $delegatedAdmins = @()
             if ($delegatedData -and $delegatedData.DelegatedAdministrators) {
-                foreach ($delegatedAdmin in (Get-AuditCliArray $delegatedData.$DelegatedAdministrators)) {
+                foreach ($delegatedAdmin in (Get-AuditCliArray $delegatedData.DelegatedAdministrators)) {
                     $delegatedAdmins += @{
                         account_id         = [string]$delegatedAdmin.Id
                         service_principals = @($delegatedAdmin.ServicePrincipal)
@@ -535,7 +535,7 @@ function Get-DomainChecks {
             $guardDutyDelegated = ((Get-AuditCollectionCount $guardDutyAdminAccounts) -gt 0)
             if (-not $guardDutyDelegated -and (Get-AuditCollectionCount $delegatedAdmins) -gt 0) {
                 foreach ($delegatedAdmin in $delegatedAdmins) {
-                    foreach ($principal in (Get-AuditCliArray $delegatedAdmin.$service_principals)) {
+                    foreach ($principal in (Get-AuditCliArray $delegatedAdmin.service_principals)) {
                         if ($principal -like '*guardduty*') {
                             $guardDutyDelegated = $true
                             break
@@ -632,7 +632,7 @@ function Get-DomainChecks {
             foreach ($budget in $budgets) {
                 $alertThresholds = @()
                 if (Test-AuditHasProperty -Object $budget -PropertyName 'NotificationsWithSubscribers') {
-                    foreach ($notification in (Get-AuditCliArray $budget.$NotificationsWithSubscribers)) {
+                    foreach ($notification in (Get-AuditCliArray $budget.NotificationsWithSubscribers)) {
                         if (Test-AuditHasProperty -Object $notification -PropertyName 'Notification') {
                             if ($notification.Notification.Threshold) {
                                 $alertThresholds += [string]$notification.Notification.Threshold
@@ -829,7 +829,7 @@ function Get-DomainChecks {
             }
 
             $policyNames = @()
-            foreach ($document in (Get-AuditCliArray $scpData.$Documents)) {
+            foreach ($document in (Get-AuditCliArray $scpData.Documents)) {
                 if (Test-AuditHasProperty -Object $document -PropertyName 'Name') {
                     $policyNames += [string]$document.Name
                 }

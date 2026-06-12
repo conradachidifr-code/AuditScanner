@@ -354,10 +354,10 @@ function Get-DomainChecks {
             }
 
             $vpcStats = @{}
-            foreach ($subnetId in (Get-AuditCliArray $subnetMap.$Keys)) {
+            foreach ($subnetId in (Get-AuditCliArray $subnetMap.Keys)) {
                 $entry = $subnetMap[$subnetId]
                 $vpcId = $entry.vpc_id
-                if (-not (Test-AuditHasProperty -Object $vpcStats -PropertyName 'ContainsKey')($vpcId)) {
+                if (-not $vpcStats.ContainsKey($vpcId)) {
                     $vpcStats[$vpcId] = @{
                         public_count  = 0
                         private_count = 0
@@ -533,7 +533,7 @@ function Get-DomainChecks {
             }
 
             $privateVpcIds = @{}
-            foreach ($subnetId in (Get-AuditCliArray $subnetMap.$Keys)) {
+            foreach ($subnetId in (Get-AuditCliArray $subnetMap.Keys)) {
                 if (-not $subnetMap[$subnetId].is_public) {
                     $privateVpcIds[$subnetMap[$subnetId].vpc_id] = $true
                 }

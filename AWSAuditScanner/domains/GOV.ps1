@@ -100,7 +100,7 @@ function Get-GovTaggedResourceStats {
     foreach ($resource in $resources) {
         $hasOwnerTag = $false
         if (Test-AuditHasProperty -Object $resource -PropertyName 'Tags') {
-            foreach ($tag in (Get-AuditCliArray $resource.$Tags)) {
+            foreach ($tag in (Get-AuditCliArray $resource.Tags)) {
                 if ($tag.Key -eq 'Owner' -or $tag.Key -eq 'owner') {
                     if (-not [string]::IsNullOrWhiteSpace([string]$tag.Value)) {
                         $hasOwnerTag = $true
@@ -461,7 +461,7 @@ function Get-DomainChecks {
                     continue
                 }
 
-                foreach ($target in (Get-AuditCliArray $targetData.$Targets)) {
+                foreach ($target in (Get-AuditCliArray $targetData.Targets)) {
                     $targetType = $null
                     if ((Test-AuditHasProperty -Object $target -PropertyName 'Type')) {
                         $targetType = [string]$target.Type
@@ -661,7 +661,7 @@ function Get-DomainChecks {
                     $runtime = [string]$function.Runtime
                 }
 
-                if (-not (Test-AuditHasProperty -Object $runtimeSummary -PropertyName 'ContainsKey')($runtime)) {
+                if (-not $runtimeSummary.ContainsKey($runtime)) {
                     $runtimeSummary[$runtime] = 0
                 }
                 $runtimeSummary[$runtime] = $runtimeSummary[$runtime] + 1
@@ -738,7 +738,7 @@ function Get-DomainChecks {
             if (Test-AuditHasProperty -Object $trailData -PropertyName 'trailList') {
                 $trailCount = (Get-AuditCollectionCount $trailData.trailList)
 
-                foreach ($trail in (Get-AuditCliArray $trailData.$trailList)) {
+                foreach ($trail in (Get-AuditCliArray $trailData.trailList)) {
                     if (-not (Test-AuditHasProperty -Object $trail -PropertyName 'Name')) {
                         continue
                     }
@@ -782,7 +782,7 @@ function Get-DomainChecks {
                             $recorderStatusData = Invoke-AWSCLI -Arguments $statusArgs -Region $Region
                             if ($null -ne $recorderStatusData) {
                                 if (Test-AuditHasProperty -Object $recorderStatusData -PropertyName 'ConfigurationRecordersStatus') {
-                                    foreach ($recorderStatus in (Get-AuditCliArray $recorderStatusData.$ConfigurationRecordersStatus)) {
+                                    foreach ($recorderStatus in (Get-AuditCliArray $recorderStatusData.ConfigurationRecordersStatus)) {
                                         if ($recorderStatus.recording -eq $true) {
                                             $configRecorderActive = $true
                                             break

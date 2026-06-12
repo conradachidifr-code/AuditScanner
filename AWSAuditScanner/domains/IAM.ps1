@@ -266,7 +266,7 @@ function Get-IamUserAccessKeySummary {
 
     $activeKeys = @()
     if (Test-AuditHasProperty -Object $data -PropertyName 'AccessKeyMetadata') {
-        foreach ($key in (Get-AuditCliArray $data.$AccessKeyMetadata)) {
+        foreach ($key in (Get-AuditCliArray $data.AccessKeyMetadata)) {
             if ($key.Status -eq 'Active') {
                 $activeKeys += $key
             }
@@ -294,7 +294,7 @@ function Test-IamRoleHasAdministratorAccess {
         return $false
     }
 
-    foreach ($policy in (Get-AuditCliArray $data.$AttachedPolicies)) {
+    foreach ($policy in (Get-AuditCliArray $data.AttachedPolicies)) {
         $policyName = [string]$policy.PolicyName
         $policyArn = [string]$policy.PolicyArn
         if ($policyName -eq 'AdministratorAccess') {
@@ -420,7 +420,7 @@ function Get-IamPermissionSetDetails {
         }
 
         if (Test-AuditHasProperty -Object $listData -PropertyName 'PermissionSets') {
-            foreach ($permissionSetArn in (Get-AuditCliArray $listData.$PermissionSets)) {
+            foreach ($permissionSetArn in (Get-AuditCliArray $listData.PermissionSets)) {
                 $describeData = Invoke-AWSCLI -Arguments @(
                     'sso-admin', 'describe-permission-set',
                     '--instance-arn', $InstanceArn,
@@ -470,7 +470,7 @@ function Test-IamPermissionSetHasAdministratorAccess {
         return $false
     }
 
-    foreach ($policy in (Get-AuditCliArray $data.$AttachedManagedPolicies)) {
+    foreach ($policy in (Get-AuditCliArray $data.AttachedManagedPolicies)) {
         if ([string]$policy.Name -eq 'AdministratorAccess') {
             return $true
         }
@@ -755,7 +755,7 @@ function Get-DomainChecks {
                         $duration = [string]$permissionSet.SessionDuration
                     }
 
-                    if (-not (Test-AuditHasProperty -Object $durationBuckets -PropertyName 'ContainsKey')($duration)) {
+                    if (-not $durationBuckets.ContainsKey($duration)) {
                         $durationBuckets[$duration] = 0
                     }
                     $durationBuckets[$duration] = $durationBuckets[$duration] + 1
@@ -1293,7 +1293,7 @@ function Get-DomainChecks {
 
             $providers = @()
             if (Test-AuditHasProperty -Object $data -PropertyName 'OpenIDConnectProviderList') {
-                foreach ($provider in (Get-AuditCliArray $data.$OpenIDConnectProviderList)) {
+                foreach ($provider in (Get-AuditCliArray $data.OpenIDConnectProviderList)) {
                     if (Test-AuditHasProperty -Object $provider -PropertyName 'Arn') {
                         $providers += [string]$provider.Arn
                     }
@@ -1361,7 +1361,7 @@ function Get-DomainChecks {
 
             $matchingAlarms = @()
             if ($alarmData -and $alarmData.MetricAlarms) {
-                foreach ($alarm in (Get-AuditCliArray $alarmData.$MetricAlarms)) {
+                foreach ($alarm in (Get-AuditCliArray $alarmData.MetricAlarms)) {
                     $alarmName = [string]$alarm.AlarmName
                     $metricName = [string]$alarm.MetricName
                     if ($alarmName -match 'KMS|Key' -or $metricName -match 'ScheduleKeyDeletion|KMS') {
@@ -1372,7 +1372,7 @@ function Get-DomainChecks {
 
             $matchingRules = @()
             if ($rulesData -and $rulesData.Rules) {
-                foreach ($rule in (Get-AuditCliArray $rulesData.$Rules)) {
+                foreach ($rule in (Get-AuditCliArray $rulesData.Rules)) {
                     $ruleName = [string]$rule.Name
                     $eventPattern = [string]$rule.EventPattern
                     if ($ruleName -match 'KMS|Key' -or $eventPattern -match 'kms|ScheduleKeyDeletion') {
@@ -1537,7 +1537,7 @@ function Get-DomainChecks {
             $privateCaCount = 0
             $sourceTypes = @()
 
-            foreach ($anchor in (Get-AuditCliArray $context.$TrustAnchors)) {
+            foreach ($anchor in (Get-AuditCliArray $context.TrustAnchors)) {
                 $sourceType = [string]$anchor.SourceType
                 if ((Get-AuditCollectionCount $sourceTypes) -lt 10) {
                     $sourceTypes += $sourceType
@@ -1580,7 +1580,7 @@ function Get-DomainChecks {
             }
 
             $longLifetimeProfiles = @()
-            foreach ($profile in (Get-AuditCliArray $context.$Profiles)) {
+            foreach ($profile in (Get-AuditCliArray $context.Profiles)) {
                 $duration = 0
                 if ($profile.SessionPolicy -and $profile.DurationSeconds) {
                     $duration = [int]$profile.DurationSeconds
@@ -1662,7 +1662,7 @@ function Get-DomainChecks {
 
             $roleIds = @()
             $sharedRoleCount = 0
-            foreach ($profile in (Get-AuditCliArray $context.$Profiles)) {
+            foreach ($profile in (Get-AuditCliArray $context.Profiles)) {
                 $roleArn = [string]$profile.RoleArn
                 if ([string]::IsNullOrWhiteSpace($roleArn)) { continue }
                 if ($roleIds -contains $roleArn) {
@@ -1721,7 +1721,7 @@ function Get-DomainChecks {
 
             $profilesWithConditions = 0
             $profilesWithoutConditions = 0
-            foreach ($profile in (Get-AuditCliArray $context.$Profiles)) {
+            foreach ($profile in (Get-AuditCliArray $context.Profiles)) {
                 $policyText = [string]$profile.SessionPolicy
                 if ($policyText -match 'serialNumber|aws:SourceIp|IpAddress') {
                     $profilesWithConditions++
@@ -1779,7 +1779,7 @@ function Get-DomainChecks {
 
             $recorderActive = $false
             if ($statusData -and $statusData.ConfigurationRecordersStatus) {
-                foreach ($status in (Get-AuditCliArray $statusData.$ConfigurationRecordersStatus)) {
+                foreach ($status in (Get-AuditCliArray $statusData.ConfigurationRecordersStatus)) {
                     if ($status.recording -eq $true) {
                         $recorderActive = $true
                         break
@@ -1789,7 +1789,7 @@ function Get-DomainChecks {
 
             $iamRules = @()
             if ($rulesData -and $rulesData.ConfigRules) {
-                foreach ($rule in (Get-AuditCliArray $rulesData.$ConfigRules)) {
+                foreach ($rule in (Get-AuditCliArray $rulesData.ConfigRules)) {
                     $ruleName = [string]$rule.ConfigRuleName
                     if ($ruleName -match 'IAM|iam') {
                         $iamRules += $ruleName
@@ -1838,7 +1838,7 @@ function Get-DomainChecks {
                 if ($roleName -match '^([^-/_]+)') {
                     $prefix = $Matches[1]
                 }
-                if (-not (Test-AuditHasProperty -Object $prefixes -PropertyName 'ContainsKey')($prefix)) {
+                if (-not $prefixes.ContainsKey($prefix)) {
                     $prefixes[$prefix] = 0
                 }
                 $prefixes[$prefix] = $prefixes[$prefix] + 1
@@ -1979,7 +1979,7 @@ function Get-DomainChecks {
 
             $externalApps = @()
             if ($appsData -and $appsData.Applications) {
-                foreach ($app in (Get-AuditCliArray $appsData.$Applications)) {
+                foreach ($app in (Get-AuditCliArray $appsData.Applications)) {
                     $providerArn = [string]$app.ApplicationProviderArn
                     if ($providerArn -and $providerArn -notmatch 'awsapps\.com') {
                         $externalApps += [string]$app.ApplicationArn
@@ -2169,7 +2169,7 @@ function Get-DomainChecks {
                         $duration = [string]$permissionSet.SessionDuration
                     }
 
-                    if (-not (Test-AuditHasProperty -Object $durationBuckets -PropertyName 'ContainsKey')($duration)) {
+                    if (-not $durationBuckets.ContainsKey($duration)) {
                         $durationBuckets[$duration] = 0
                     }
                     $durationBuckets[$duration] = $durationBuckets[$duration] + 1
@@ -2284,7 +2284,7 @@ function Get-DomainChecks {
 
             $ssoRules = @()
             if (Test-AuditHasProperty -Object $rulesData -PropertyName 'Rules') {
-                foreach ($rule in (Get-AuditCliArray $rulesData.$Rules)) {
+                foreach ($rule in (Get-AuditCliArray $rulesData.Rules)) {
                     $ruleName = [string]$rule.Name
                     $eventPattern = [string]$rule.EventPattern
                     if ($eventPattern -match 'sso\.amazonaws\.com|CreateUser|PutInlinePolicyToPermissionSet' -or $ruleName -match 'SSO|IdentityCenter|IAM') {

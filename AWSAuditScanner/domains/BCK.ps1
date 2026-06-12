@@ -89,7 +89,7 @@ function Get-BckSelectionResourceTypes {
         return @()
     }
 
-    foreach ($selection in (Get-AuditCliArray $listData.$BackupSelectionsList)) {
+    foreach ($selection in (Get-AuditCliArray $listData.BackupSelectionsList)) {
         if (-not (Test-AuditHasProperty -Object $selection -PropertyName 'SelectionId')) {
             continue
         }
@@ -180,7 +180,7 @@ function Get-BckS3BucketNames {
 
     $bucketNames = @()
     if (Test-AuditHasProperty -Object $data -PropertyName 'Buckets') {
-        foreach ($bucket in (Get-AuditCliArray $data.$Buckets)) {
+        foreach ($bucket in (Get-AuditCliArray $data.Buckets)) {
             if (Test-AuditHasProperty -Object $bucket -PropertyName 'Name') {
                 $bucketNames += [string]$bucket.Name
             }
@@ -407,7 +407,7 @@ function Get-DomainChecks {
             $vaultEvidence = @()
             $failingVaults = 0
 
-            foreach ($vault in (Get-AuditCliArray $listData.$BackupVaultList)) {
+            foreach ($vault in (Get-AuditCliArray $listData.BackupVaultList)) {
                 $vaultName = [string]$vault.BackupVaultName
                 $detailData = Invoke-AWSCLI -Arguments @('backup', 'describe-backup-vault', '--backup-vault-name', $vaultName) -Region $Region
                 if ($null -eq $detailData) {
@@ -472,7 +472,7 @@ function Get-DomainChecks {
             $vaultEvidence = @()
             $failingVaults = 0
 
-            foreach ($vault in (Get-AuditCliArray $listData.$BackupVaultList)) {
+            foreach ($vault in (Get-AuditCliArray $listData.BackupVaultList)) {
                 $vaultName = [string]$vault.BackupVaultName
                 $policyData = Invoke-AWSCLI -Arguments @('backup', 'get-backup-vault-access-policy', '--backup-vault-name', $vaultName) -Region $Region
 
@@ -531,7 +531,7 @@ function Get-DomainChecks {
             $crossRegionCount = 0
 
             if (Test-AuditHasProperty -Object $data -PropertyName 'CopyJobs') {
-                foreach ($job in (Get-AuditCliArray $data.$CopyJobs)) {
+                foreach ($job in (Get-AuditCliArray $data.CopyJobs)) {
                     $destinationArn = [string]$job.DestinationBackupVaultArn
                     $destinationRegion = $null
                     if ($destinationArn -match 'arn:aws:backup:([^:]+):') {
@@ -999,7 +999,7 @@ function Get-DomainChecks {
             $typeCounts = @{}
             foreach ($resource in $resources) {
                 $resourceType = [string]$resource.ResourceType
-                if (-not (Test-AuditHasProperty -Object $typeCounts -PropertyName 'ContainsKey')($resourceType)) {
+                if (-not $typeCounts.ContainsKey($resourceType)) {
                     $typeCounts[$resourceType] = 0
                 }
                 $typeCounts[$resourceType] = $typeCounts[$resourceType] + 1
