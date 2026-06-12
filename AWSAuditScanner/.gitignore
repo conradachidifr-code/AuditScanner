@@ -8,3 +8,5 @@ anonymization-map*.json
 *.pem
 credentials
 NET.ps1_bkp.ps1
+AWSAuditScanner.zip
+AuditDiagnostics_*.log

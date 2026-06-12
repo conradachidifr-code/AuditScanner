@@ -145,11 +145,13 @@ function Get-IamAllUsers {
         }
 
         $marker = $null
-        if ($data.IsTruncated -eq $true) {
-            if ((Test-AuditHasProperty -Object $data -PropertyName 'Marker')) {
-                if (-not [string]::IsNullOrWhiteSpace([string]$data.Marker)) {
-                    $marker = [string]$data.Marker
-                }
+        $isTruncated = $false
+        if (Test-AuditHasProperty -Object $data -PropertyName 'IsTruncated') {
+            $isTruncated = ($data.IsTruncated -eq $true)
+        }
+        if ($isTruncated -and (Test-AuditHasProperty -Object $data -PropertyName 'Marker')) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$data.Marker)) {
+                $marker = [string]$data.Marker
             }
         }
     } while ($marker)
@@ -184,11 +186,13 @@ function Get-IamAllRoles {
         }
 
         $marker = $null
-        if ($data.IsTruncated -eq $true) {
-            if ((Test-AuditHasProperty -Object $data -PropertyName 'Marker')) {
-                if (-not [string]::IsNullOrWhiteSpace([string]$data.Marker)) {
-                    $marker = [string]$data.Marker
-                }
+        $isTruncated = $false
+        if (Test-AuditHasProperty -Object $data -PropertyName 'IsTruncated') {
+            $isTruncated = ($data.IsTruncated -eq $true)
+        }
+        if ($isTruncated -and (Test-AuditHasProperty -Object $data -PropertyName 'Marker')) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$data.Marker)) {
+                $marker = [string]$data.Marker
             }
         }
     } while ($marker)
@@ -743,7 +747,12 @@ function Get-DomainChecks {
             $permissionSetCount = 0
 
             foreach ($instance in $instances) {
-                $permissionSets = Get-IamPermissionSetDetails -Region $Region -InstanceArn $instance.InstanceArn
+                $instanceArn = [string](Get-AuditPropertyValue $instance -PropertyNames @('InstanceArn'))
+                if ([string]::IsNullOrWhiteSpace($instanceArn)) {
+                    continue
+                }
+
+                $permissionSets = Get-IamPermissionSetDetails -Region $Region -InstanceArn $instanceArn
                 if ($null -eq $permissionSets) {
                     continue
                 }
@@ -763,7 +772,7 @@ function Get-DomainChecks {
                     $hours = Get-IamIsoDurationHours -Duration $duration
                     if ($hours -gt 8) {
                         if ((Get-AuditCollectionCount $longDurationSets) -lt 10) {
-                            $longDurationSets += [string]$permissionSet.Name
+                            $longDurationSets += [string](Get-AuditPropertyValue $permissionSet -PropertyNames @('Name'))
                         }
                     }
                 }
@@ -1363,7 +1372,7 @@ function Get-DomainChecks {
             if ($alarmData -and $alarmData.MetricAlarms) {
                 foreach ($alarm in (Get-AuditCliArray $alarmData.MetricAlarms)) {
                     $alarmName = [string]$alarm.AlarmName
-                    $metricName = [string]$alarm.MetricName
+                    $metricName = [string](Get-AuditPropertyValue $alarm -PropertyNames @('MetricName'))
                     if ($alarmName -match 'KMS|Key' -or $metricName -match 'ScheduleKeyDeletion|KMS') {
                         $matchingAlarms += $alarmName
                     }
@@ -1374,7 +1383,7 @@ function Get-DomainChecks {
             if ($rulesData -and $rulesData.Rules) {
                 foreach ($rule in (Get-AuditCliArray $rulesData.Rules)) {
                     $ruleName = [string]$rule.Name
-                    $eventPattern = [string]$rule.EventPattern
+                    $eventPattern = [string](Get-AuditPropertyValue $rule -PropertyNames @('EventPattern'))
                     if ($ruleName -match 'KMS|Key' -or $eventPattern -match 'kms|ScheduleKeyDeletion') {
                         $matchingRules += $ruleName
                     }
@@ -1538,7 +1547,7 @@ function Get-DomainChecks {
             $sourceTypes = @()
 
             foreach ($anchor in (Get-AuditCliArray $context.TrustAnchors)) {
-                $sourceType = [string]$anchor.SourceType
+                $sourceType = [string](Get-AuditPropertyValue $anchor -PropertyNames @('SourceType'))
                 if ((Get-AuditCollectionCount $sourceTypes) -lt 10) {
                     $sourceTypes += $sourceType
                 }
@@ -1582,17 +1591,15 @@ function Get-DomainChecks {
             $longLifetimeProfiles = @()
             foreach ($profile in (Get-AuditCliArray $context.Profiles)) {
                 $duration = 0
-                if ($profile.SessionPolicy -and $profile.DurationSeconds) {
-                    $duration = [int]$profile.DurationSeconds
-                }
-                if ((Test-AuditHasProperty -Object $profile -PropertyName 'DurationSeconds')) {
-                    $duration = [int]$profile.DurationSeconds
+                $durationValue = Get-AuditPropertyValue $profile -PropertyNames @('DurationSeconds')
+                if ($null -ne $durationValue) {
+                    $duration = [int]$durationValue
                 }
 
                 $days = [math]::Round(($duration / 86400), 2)
                 if ($days -gt 90) {
                     if ((Get-AuditCollectionCount $longLifetimeProfiles) -lt 10) {
-                        $longLifetimeProfiles += [string]$profile.Name
+                        $longLifetimeProfiles += [string](Get-AuditPropertyValue $profile -PropertyNames @('Name'))
                     }
                 }
             }
@@ -1663,7 +1670,7 @@ function Get-DomainChecks {
             $roleIds = @()
             $sharedRoleCount = 0
             foreach ($profile in (Get-AuditCliArray $context.Profiles)) {
-                $roleArn = [string]$profile.RoleArn
+                $roleArn = [string](Get-AuditPropertyValue $profile -PropertyNames @('RoleArn'))
                 if ([string]::IsNullOrWhiteSpace($roleArn)) { continue }
                 if ($roleIds -contains $roleArn) {
                     $sharedRoleCount++
@@ -1722,7 +1729,7 @@ function Get-DomainChecks {
             $profilesWithConditions = 0
             $profilesWithoutConditions = 0
             foreach ($profile in (Get-AuditCliArray $context.Profiles)) {
-                $policyText = [string]$profile.SessionPolicy
+                $policyText = [string](Get-AuditPropertyValue $profile -PropertyNames @('SessionPolicy'))
                 if ($policyText -match 'serialNumber|aws:SourceIp|IpAddress') {
                     $profilesWithConditions++
                 }
@@ -1930,7 +1937,7 @@ function Get-DomainChecks {
 
             $instanceArn = $null
             if ((Get-AuditCollectionCount $instances) -gt 0) {
-                $instanceArn = [string]$instances[0].InstanceArn
+                $instanceArn = [string](Get-AuditPropertyValue $instances[0] -PropertyNames @('InstanceArn'))
             }
 
             $evidence = @{
@@ -1969,7 +1976,11 @@ function Get-DomainChecks {
                     -Status 'FAIL' -Evidence @{ instance_count = 0 } -Notes 'No Identity Center instance found'
             }
 
-            $instanceArn = [string]$instances[0].InstanceArn
+            $instanceArn = [string](Get-AuditPropertyValue $instances[0] -PropertyNames @('InstanceArn'))
+            if ([string]::IsNullOrWhiteSpace($instanceArn)) {
+                return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-44'
+            }
+
             $describeData = Invoke-AWSCLI -Arguments @('sso-admin', 'describe-instance', '--instance-arn', $instanceArn) -Region $Region
             $appsData = Invoke-AWSCLI -Arguments @('sso-admin', 'list-applications', '--instance-arn', $instanceArn) -Region $Region
 
@@ -1980,16 +1991,20 @@ function Get-DomainChecks {
             $externalApps = @()
             if ($appsData -and $appsData.Applications) {
                 foreach ($app in (Get-AuditCliArray $appsData.Applications)) {
-                    $providerArn = [string]$app.ApplicationProviderArn
+                    $providerArn = [string](Get-AuditPropertyValue $app -PropertyNames @('ApplicationProviderArn'))
                     if ($providerArn -and $providerArn -notmatch 'awsapps\.com') {
-                        $externalApps += [string]$app.ApplicationArn
+                        $externalApps += [string](Get-AuditPropertyValue $app -PropertyNames @('ApplicationArn'))
                     }
                 }
             }
 
             $identityStoreId = $null
-            if ($describeData -and $describeData.Instance -and $describeData.Instance.IdentityStoreId) {
-                $identityStoreId = [string]$describeData.Instance.IdentityStoreId
+            $instanceDetail = Get-AuditPropertyValue $describeData -PropertyNames @('Instance')
+            if ($null -ne $instanceDetail) {
+                $identityStoreIdValue = Get-AuditPropertyValue $instanceDetail -PropertyNames @('IdentityStoreId')
+                if ($null -ne $identityStoreIdValue) {
+                    $identityStoreId = [string]$identityStoreIdValue
+                }
             }
 
             $evidence = @{
@@ -2054,12 +2069,18 @@ function Get-DomainChecks {
             $sampleNames = @()
             $permissionSetCount = 0
             foreach ($instance in $instances) {
-                $permissionSets = Get-IamPermissionSetDetails -Region $Region -InstanceArn $instance.InstanceArn
+                $instanceArn = [string](Get-AuditPropertyValue $instance -PropertyNames @('InstanceArn'))
+                if ([string]::IsNullOrWhiteSpace($instanceArn)) {
+                    continue
+                }
+
+                $permissionSets = Get-IamPermissionSetDetails -Region $Region -InstanceArn $instanceArn
                 if ($null -eq $permissionSets) { continue }
                 foreach ($permissionSet in $permissionSets) {
                     $permissionSetCount++
-                    if ((Get-AuditCollectionCount $sampleNames) -lt 10 -and $permissionSet.Name) {
-                        $sampleNames += [string]$permissionSet.Name
+                    $permissionSetName = [string](Get-AuditPropertyValue $permissionSet -PropertyNames @('Name'))
+                    if ((Get-AuditCollectionCount $sampleNames) -lt 10 -and -not [string]::IsNullOrWhiteSpace($permissionSetName)) {
+                        $sampleNames += $permissionSetName
                     }
                 }
             }
@@ -2087,13 +2108,23 @@ function Get-DomainChecks {
 
             $adminPermissionSets = @()
             foreach ($instance in $instances) {
-                $permissionSets = Get-IamPermissionSetDetails -Region $Region -InstanceArn $instance.InstanceArn
+                $instanceArn = [string](Get-AuditPropertyValue $instance -PropertyNames @('InstanceArn'))
+                if ([string]::IsNullOrWhiteSpace($instanceArn)) {
+                    continue
+                }
+
+                $permissionSets = Get-IamPermissionSetDetails -Region $Region -InstanceArn $instanceArn
                 if ($null -eq $permissionSets) { continue }
 
                 foreach ($permissionSet in $permissionSets) {
-                    if (Test-IamPermissionSetHasAdministratorAccess -Region $Region -InstanceArn $instance.InstanceArn -PermissionSetArn $permissionSet.PermissionSetArn) {
+                    $permissionSetArn = [string](Get-AuditPropertyValue $permissionSet -PropertyNames @('PermissionSetArn'))
+                    if ([string]::IsNullOrWhiteSpace($permissionSetArn)) {
+                        continue
+                    }
+
+                    if (Test-IamPermissionSetHasAdministratorAccess -Region $Region -InstanceArn $instanceArn -PermissionSetArn $permissionSetArn) {
                         if ((Get-AuditCollectionCount $adminPermissionSets) -lt 10) {
-                            $adminPermissionSets += [string]$permissionSet.Name
+                            $adminPermissionSets += [string](Get-AuditPropertyValue $permissionSet -PropertyNames @('Name'))
                         }
                     }
                 }
@@ -2127,11 +2158,17 @@ function Get-DomainChecks {
 
             $sampleNames = @()
             foreach ($instance in $instances) {
-                $permissionSets = Get-IamPermissionSetDetails -Region $Region -InstanceArn $instance.InstanceArn
+                $instanceArn = [string](Get-AuditPropertyValue $instance -PropertyNames @('InstanceArn'))
+                if ([string]::IsNullOrWhiteSpace($instanceArn)) {
+                    continue
+                }
+
+                $permissionSets = Get-IamPermissionSetDetails -Region $Region -InstanceArn $instanceArn
                 if ($null -eq $permissionSets) { continue }
                 foreach ($permissionSet in $permissionSets) {
-                    if ((Get-AuditCollectionCount $sampleNames) -lt 20 -and $permissionSet.Name) {
-                        $sampleNames += [string]$permissionSet.Name
+                    $permissionSetName = [string](Get-AuditPropertyValue $permissionSet -PropertyNames @('Name'))
+                    if ((Get-AuditCollectionCount $sampleNames) -lt 20 -and -not [string]::IsNullOrWhiteSpace($permissionSetName)) {
+                        $sampleNames += $permissionSetName
                     }
                 }
             }
@@ -2159,7 +2196,12 @@ function Get-DomainChecks {
             $permissionSetCount = 0
 
             foreach ($instance in $instances) {
-                $permissionSets = Get-IamPermissionSetDetails -Region $Region -InstanceArn $instance.InstanceArn
+                $instanceArn = [string](Get-AuditPropertyValue $instance -PropertyNames @('InstanceArn'))
+                if ([string]::IsNullOrWhiteSpace($instanceArn)) {
+                    continue
+                }
+
+                $permissionSets = Get-IamPermissionSetDetails -Region $Region -InstanceArn $instanceArn
                 if ($null -eq $permissionSets) { continue }
 
                 foreach ($permissionSet in $permissionSets) {
@@ -2176,7 +2218,7 @@ function Get-DomainChecks {
 
                     if ((Get-IamIsoDurationHours -Duration $duration) -gt 8) {
                         if ((Get-AuditCollectionCount $longDurationSets) -lt 10) {
-                            $longDurationSets += [string]$permissionSet.Name
+                            $longDurationSets += [string](Get-AuditPropertyValue $permissionSet -PropertyNames @('Name'))
                         }
                     }
                 }
@@ -2286,7 +2328,7 @@ function Get-DomainChecks {
             if (Test-AuditHasProperty -Object $rulesData -PropertyName 'Rules') {
                 foreach ($rule in (Get-AuditCliArray $rulesData.Rules)) {
                     $ruleName = [string]$rule.Name
-                    $eventPattern = [string]$rule.EventPattern
+                    $eventPattern = [string](Get-AuditPropertyValue $rule -PropertyNames @('EventPattern'))
                     if ($eventPattern -match 'sso\.amazonaws\.com|CreateUser|PutInlinePolicyToPermissionSet' -or $ruleName -match 'SSO|IdentityCenter|IAM') {
                         $ssoRules += $ruleName
                     }

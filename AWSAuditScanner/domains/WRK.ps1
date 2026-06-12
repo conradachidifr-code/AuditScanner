@@ -419,7 +419,7 @@ function Get-DomainChecks {
 
             foreach ($alarm in $allAlarms) {
                 $alarmName = [string]$alarm.AlarmName
-                $metricName = [string]$alarm.MetricName
+                $metricName = [string](Get-AuditPropertyValue $alarm -PropertyNames @('MetricName'))
                 $namespace = [string]$alarm.Namespace
                 $combined = ($alarmName + ' ' + $metricName + ' ' + $namespace)
 

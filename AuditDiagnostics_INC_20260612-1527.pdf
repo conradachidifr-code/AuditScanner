@@ -1,0 +1,37 @@
+﻿AWS Audit Scanner - account diagnostic log
+Domain    : INC
+Account   : PROD-SEC (421366298108)
+Started   : 2026-06-12 15:27:49
+Auditor   : Conrad
+PowerShell exceptions and failed AWS CLI commands are recorded below.
+
+================================================================================
+[2026-06-12 15:27:52] POWERSHELL_EXCEPTION
+Domain      : INC
+Account     : PROD-SEC (421366298108)
+Region      : eu-west-1
+Control     : INC-03
+Message     : La propriété « EventPattern » est introuvable dans cet objet. Vérifiez qu’elle existe.
+ExceptionType: System.Management.Automation.PropertyNotFoundException
+Stack trace :
+  à <ScriptBlock>, C:\Users\CA575D0L\Downloads\AWSAuditScanner\AWSAuditScanner\domains\INC.ps1 : ligne 186
+  à <ScriptBlock>, C:\Users\CA575D0L\Downloads\AWSAuditScanner\AWSAuditScanner\Invoke-AWSScanner.ps1 : ligne 1600
+  à <ScriptBlock>, <Aucun fichier> : ligne 1
+All CLI commands during this check:
+  [OK exit=0] aws events list-rules --output json --region eu-west-1 --profile PROD-SEC
+
+================================================================================
+[2026-06-12 15:38:43] POWERSHELL_EXCEPTION
+Domain      : INC
+Account     : PROD-SEC (421366298108)
+Region      : eu-west-3
+Control     : INC-03
+Message     : La propriété « EventPattern » est introuvable dans cet objet. Vérifiez qu’elle existe.
+ExceptionType: System.Management.Automation.PropertyNotFoundException
+Stack trace :
+  à <ScriptBlock>, C:\Users\CA575D0L\Downloads\AWSAuditScanner\AWSAuditScanner\domains\INC.ps1 : ligne 186
+  à <ScriptBlock>, C:\Users\CA575D0L\Downloads\AWSAuditScanner\AWSAuditScanner\Invoke-AWSScanner.ps1 : ligne 1600
+  à <ScriptBlock>, <Aucun fichier> : ligne 1
+All CLI commands during this check:
+  [OK exit=0] aws events list-rules --output json --region eu-west-3 --profile PROD-SEC
+

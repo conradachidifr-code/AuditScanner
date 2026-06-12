@@ -166,9 +166,13 @@ function Get-OrgIamRoles {
         }
 
         $marker = $null
-        if ((Test-AuditHasProperty -Object $data -PropertyName 'Marker')) {
+        if (Test-AuditHasProperty -Object $data -PropertyName 'Marker') {
             if (-not [string]::IsNullOrWhiteSpace([string]$data.Marker)) {
-                if ($data.IsTruncated -eq $true) {
+                $isTruncated = $true
+                if (Test-AuditHasProperty -Object $data -PropertyName 'IsTruncated') {
+                    $isTruncated = ($data.IsTruncated -eq $true)
+                }
+                if ($isTruncated) {
                     $marker = [string]$data.Marker
                 }
             }

@@ -183,8 +183,9 @@ function Get-DomainChecks {
             if (Test-AuditHasProperty -Object $data -PropertyName 'Rules') {
                 foreach ($rule in (Get-AuditCliArray $data.Rules)) {
                     $ruleName = [string]$rule.Name
-                    $eventPattern = [string]$rule.EventPattern
-                    $combined = ($ruleName + ' ' + $eventPattern)
+                    $eventPattern = [string](Get-AuditPropertyValue $rule -PropertyNames @('EventPattern'))
+                    $scheduleExpression = [string](Get-AuditPropertyValue $rule -PropertyNames @('ScheduleExpression'))
+                    $combined = ($ruleName + ' ' + $eventPattern + ' ' + $scheduleExpression)
 
                     if ($combined -match 'guardduty|aws\.guardduty') {
                         $guardDutyRules += $ruleName

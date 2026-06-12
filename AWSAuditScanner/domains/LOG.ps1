@@ -985,7 +985,7 @@ function Get-DomainChecks {
             if ($rulesData -and $rulesData.Rules) {
                 foreach ($rule in (Get-AuditCliArray $rulesData.Rules)) {
                     $ruleName = [string]$rule.Name
-                    $eventPattern = [string]$rule.EventPattern
+                    $eventPattern = [string](Get-AuditPropertyValue $rule -PropertyNames @('EventPattern'))
                     if ($eventPattern -match $iamPatterns -or $ruleName -match 'IAM|Root|ConsoleLogin') {
                         $matchingRules += $ruleName
                     }
