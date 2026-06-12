@@ -32,7 +32,7 @@ function Get-CicS3BucketNames {
 
     $bucketNames = @()
     if (Test-AuditHasProperty -Object $data -PropertyName 'Buckets') {
-        foreach ($bucket in (Get-AuditCliArray $data.$Buckets)) {
+        foreach ($bucket in (Get-AuditCliArray $data.Buckets)) {
             if (Test-AuditHasProperty -Object $bucket -PropertyName 'Name') {
                 $bucketNames += [string]$bucket.Name
             }
@@ -120,7 +120,7 @@ function Get-CicSsmStringParameterCount {
     $secureStringCount = 0
 
     if (Test-AuditHasProperty -Object $data -PropertyName 'Parameters') {
-        foreach ($parameter in (Get-AuditCliArray $data.$Parameters)) {
+        foreach ($parameter in (Get-AuditCliArray $data.Parameters)) {
             $paramType = [string]$parameter.Type
             if ($paramType -eq 'String') {
                 $stringCount++
@@ -152,7 +152,7 @@ function Get-CicActiveAccessKeyCount {
     $usersWithKeys = @()
 
     if (Test-AuditHasProperty -Object $userData -PropertyName 'Users') {
-        foreach ($user in (Get-AuditCliArray $userData.$Users)) {
+        foreach ($user in (Get-AuditCliArray $userData.Users)) {
             $userName = [string]$user.UserName
             $keyData = Invoke-AWSCLI -Arguments @('iam', 'list-access-keys', '--user-name', $userName) -Region $Region
             if ($null -eq $keyData) {
@@ -163,7 +163,7 @@ function Get-CicActiveAccessKeyCount {
                 continue
             }
 
-            foreach ($key in (Get-AuditCliArray $keyData.$AccessKeyMetadata)) {
+            foreach ($key in (Get-AuditCliArray $keyData.AccessKeyMetadata)) {
                 if ($key.Status -eq 'Active') {
                     $activeKeyCount++
                     if ((Get-AuditCollectionCount $usersWithKeys) -lt 5) {
@@ -422,7 +422,7 @@ function Get-DomainChecks {
             $recorderNames = @()
 
             if ($statusData -and $statusData.ConfigurationRecordersStatus) {
-                foreach ($status in (Get-AuditCliArray $statusData.$ConfigurationRecordersStatus)) {
+                foreach ($status in (Get-AuditCliArray $statusData.ConfigurationRecordersStatus)) {
                     if (Test-AuditHasProperty -Object $status -PropertyName 'name') {
                         $recorderNames += [string]$status.name
                     }
@@ -434,7 +434,7 @@ function Get-DomainChecks {
 
             $resourceTypes = @()
             if ($recorderData -and $recorderData.ConfigurationRecorders) {
-                foreach ($recorder in (Get-AuditCliArray $recorderData.$ConfigurationRecorders)) {
+                foreach ($recorder in (Get-AuditCliArray $recorderData.ConfigurationRecorders)) {
                     if ($recorder.recordingGroup -and $recorder.recordingGroup.allSupported -eq $true) {
                         $resourceTypes += 'ALL_SUPPORTED'
                     }
@@ -502,7 +502,7 @@ function Get-DomainChecks {
 
             if (Test-AuditHasProperty -Object $data -PropertyName 'Events') {
                 $sampledEventCount = (Get-AuditCollectionCount $data.Events)
-                foreach ($event in (Get-AuditCliArray $data.$Events)) {
+                foreach ($event in (Get-AuditCliArray $data.Events)) {
                     $eventText = [string]$event.CloudTrailEvent
                     if ($eventText -match 'console\.amazonaws\.com|AWS Console|Console') {
                         $consoleLikeEvents++
@@ -544,7 +544,7 @@ function Get-DomainChecks {
             $groupsWithoutRetention = @()
 
             if (Test-AuditHasProperty -Object $data -PropertyName 'logGroups') {
-                foreach ($logGroup in (Get-AuditCliArray $data.$logGroups)) {
+                foreach ($logGroup in (Get-AuditCliArray $data.logGroups)) {
                     $name = [string]$logGroup.logGroupName
                     $lowerName = $name.ToLower()
                     if ($lowerName -notmatch 'pipeline|codebuild|codepipeline|gitlab|ci/|/ci') {
