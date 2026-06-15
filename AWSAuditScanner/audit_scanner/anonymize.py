@@ -47,6 +47,11 @@ def _resource_pseudonym(state: AnonymizationState, prefix: str) -> str:
     return f"{prefix}-{state.resource_counters[prefix]:04d}"
 
 
+def _sub_literal(pattern: re.Pattern[str], replacement: str, text: str, count: int = 0) -> str:
+    """re.sub with a dynamic replacement, without regex backreference interpretation."""
+    return pattern.sub(lambda _match: replacement, text, count=count)
+
+
 def _add_account(state: AnonymizationState, account_id: str, role_arn: str | None = None) -> None:
     if not account_id:
         return
@@ -250,7 +255,7 @@ def _protect_prefixed_ids(text: str, state: AnonymizationState) -> str:
         pattern = re.compile(rf"\b{re.escape(prefix)}-[0-9a-f]{{8,32}}\b")
         while pattern.search(result):
             replacement = _resource_pseudonym(state, prefix)
-            result = pattern.sub(replacement, result, count=1)
+            result = _sub_literal(pattern, replacement, result, count=1)
     return result
 
 
@@ -265,9 +270,9 @@ def _protect_generic_ids(text: str, state: AnonymizationState) -> str:
             break
         prefix = match.group(1)
         if prefix in {"account", "acct", "profile", "redacted", "log", "kms", "hostedzone"} or prefix.isdigit():
-            result = pattern.sub("[REDACTED-AWS-ID]", result, count=1)
+            result = _sub_literal(pattern, "[REDACTED-AWS-ID]", result, count=1)
         else:
-            result = pattern.sub(_resource_pseudonym(state, prefix), result, count=1)
+            result = _sub_literal(pattern, _resource_pseudonym(state, prefix), result, count=1)
     return result
 
 
@@ -305,7 +310,7 @@ def protect_audit_text(text: str, state: AnonymizationState) -> str:
 
     log_path = re.compile(r"/aws/[a-zA-Z0-9_./-]+")
     while log_path.search(result):
-        result = log_path.sub(_resource_pseudonym(state, "log-group"), result, count=1)
+        result = _sub_literal(log_path, _resource_pseudonym(state, "log-group"), result, count=1)
 
     result = _replace_fields(
         result,
@@ -321,7 +326,7 @@ def protect_audit_text(text: str, state: AnonymizationState) -> str:
 
     uuid_pattern = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
     while uuid_pattern.search(result):
-        result = uuid_pattern.sub(_resource_pseudonym(state, "kms-key"), result, count=1)
+        result = _sub_literal(uuid_pattern, _resource_pseudonym(state, "kms-key"), result, count=1)
 
     result = re.sub(
         r"\bmrk-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
@@ -330,7 +335,8 @@ def protect_audit_text(text: str, state: AnonymizationState) -> str:
     )
     alias_pattern = re.compile(r"alias/[a-zA-Z0-9/_-]+")
     while alias_pattern.search(result):
-        result = alias_pattern.sub(f"alias/{_resource_pseudonym(state, 'kms-alias')}", result, count=1)
+        # Pseudonym must not start with "alias/" or the pattern matches again (infinite loop).
+        result = _sub_literal(alias_pattern, _resource_pseudonym(state, "kms-alias"), result, count=1)
 
     result = _replace_fields(
         result,
@@ -349,7 +355,7 @@ def protect_audit_text(text: str, state: AnonymizationState) -> str:
 
     hosted_zone = re.compile(r"\bZ[0-9A-Z]{10,32}\b")
     while hosted_zone.search(result):
-        result = hosted_zone.sub(_resource_pseudonym(state, "hostedzone"), result, count=1)
+        result = _sub_literal(hosted_zone, _resource_pseudonym(state, "hostedzone"), result, count=1)
 
     result = _protect_generic_ids(result, state)
     result = re.sub(

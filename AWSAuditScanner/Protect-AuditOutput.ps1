@@ -366,7 +366,8 @@ function Protect-AwsKmsAndSecrets {
 
     $aliasPattern = 'alias/[a-zA-Z0-9/_-]+'
     while ($result -match $aliasPattern) {
-        $replacement = 'alias/{0}' -f (Get-ResourcePseudonym -Prefix 'kms-alias')
+        # Do not prefix with "alias/" — replacement would match again (infinite loop).
+        $replacement = Get-ResourcePseudonym -Prefix 'kms-alias'
         $result = [regex]::Replace($result, $aliasPattern, $replacement, 1)
     }
 
