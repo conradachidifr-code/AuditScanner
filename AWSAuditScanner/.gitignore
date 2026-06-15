@@ -2,14 +2,14 @@
 AWSAuditScanner/output/
 anonymization-map*.json
 **/anonymization-map*.json
+AWSAuditScanner/NET.ps1_bkp.ps1
+AWSAuditScanner/AWSAuditScanner*.zip
 
 # AWS / local secrets
 .env
 *.pem
 credentials
-NET.ps1_bkp.ps1
-AWSAuditScanner.zip
-AuditDiagnostics_*.log
+
 
 # Python
 __pycache__/

@@ -6,42 +6,38 @@ from audit_scanner.domains.base import DomainModule
 
 VALID_DOMAINS = ("LOG", "IAM", "DET", "DAT", "GOV", "ORG", "NET", "CIC", "BCK", "INC", "WRK")
 
-_PHASE_ONE = ("DET", "INC", "NET", "IAM", "CIC", "WRK")
+_PYTHON_DOMAINS = VALID_DOMAINS
+
+_LOADERS = {
+    "BCK": "bck",
+    "CIC": "cic",
+    "DAT": "dat",
+    "DET": "det",
+    "GOV": "gov",
+    "IAM": "iam",
+    "INC": "inc",
+    "LOG": "log",
+    "NET": "net",
+    "ORG": "org",
+    "WRK": "wrk",
+}
 
 
 def load_domain_by_code(code: str) -> DomainModule:
     code = code.upper()
     if code not in VALID_DOMAINS:
         raise ValueError(f"Invalid domain '{code}'. Must be one of: {', '.join(VALID_DOMAINS)}")
-    if code not in _PHASE_ONE:
+    if code not in _PYTHON_DOMAINS:
         raise NotImplementedError(
             f"Domain '{code}' is not yet ported to Python. "
-            f"Available: {', '.join(_PHASE_ONE)}. Use Invoke-AWSScanner.ps1 for other domains."
+            f"Available: {', '.join(_PYTHON_DOMAINS)}."
         )
 
-    if code == "DET":
-        from audit_scanner.domains import det
+    module_name = _LOADERS.get(code)
+    if not module_name:
+        raise NotImplementedError(f"Domain '{code}' loader missing")
 
-        return det.get_domain()
-    if code == "INC":
-        from audit_scanner.domains import inc
+    import importlib
 
-        return inc.get_domain()
-    if code == "NET":
-        from audit_scanner.domains import net
-
-        return net.get_domain()
-    if code == "IAM":
-        from audit_scanner.domains import iam
-
-        return iam.get_domain()
-    if code == "CIC":
-        from audit_scanner.domains import cic
-
-        return cic.get_domain()
-    if code == "WRK":
-        from audit_scanner.domains import wrk
-
-        return wrk.get_domain()
-
-    raise NotImplementedError(f"Domain '{code}' loader missing")
+    module = importlib.import_module(f"audit_scanner.domains.{module_name}")
+    return module.get_domain()

@@ -8,7 +8,7 @@ Repository layout (committed to git):
 
 ```
 AWSAuditScanner/
-├── scan.py                  # Python scanner (phase 1 domains)
+├── scan.py                  # Python scanner (all domains)
 ├── protect_audit_output.py  # Python output anonymizer
 ├── requirements.txt
 ├── Invoke-AWSScanner.ps1    # PowerShell scanner (all domains)
@@ -17,7 +17,7 @@ AWSAuditScanner/
 ├── .gitignore               # Ignores output/
 ├── audit_scanner/           # Python package
 │   ├── scanner.py
-│   ├── domains/             # DET, INC, NET, IAM, CIC, WRK
+│   ├── domains/             # All 11 domains (LOG, IAM, DET, DAT, GOV, ORG, NET, CIC, BCK, INC, WRK)
 │   └── ...
 └── domains/
     ├── LOG.ps1
@@ -51,7 +51,7 @@ output/
 
 ---
 
-## Python scanner (recommended for phase-1 domains)
+## Python scanner (recommended)
 
 ### Prerequisites
 
@@ -65,11 +65,12 @@ output/
 cd AWSAuditScanner
 pip install -r requirements.txt
 aws sso login --profile PROD-SEC
-python scan.py --domain NET --auditor "Jane Doe"
+python scan.py --domain LOG --auditor "Jane Doe"
 ```
 
-**Python domains available:** `DET`, `INC`, `NET`, `IAM`, `CIC`, `WRK`  
-Other domains (`LOG`, `DAT`, `GOV`, `ORG`, `BCK`) still use `Invoke-AWSScanner.ps1`.
+**All domains available in Python:** `LOG`, `IAM`, `DET`, `DAT`, `GOV`, `ORG`, `NET`, `CIC`, `BCK`, `INC`, `WRK`
+
+PowerShell (`Invoke-AWSScanner.ps1`) remains available as a fallback with identical output format.
 
 ### Python options
 
