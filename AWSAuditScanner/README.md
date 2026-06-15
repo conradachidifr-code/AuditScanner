@@ -11,6 +11,7 @@ AWSAuditScanner/
 ├── scan.py                  # Python scanner (all domains)
 ├── protect_audit_output.py  # Python output anonymizer
 ├── requirements.txt
+├── .venv/                   # Python virtual env (create locally, not committed)
 ├── Invoke-AWSScanner.ps1    # PowerShell scanner (all domains)
 ├── accounts.json            # Target accounts and SSO profiles
 ├── README.md
@@ -59,18 +60,70 @@ output/
 2. **AWS CLI v2** on your `PATH`
 3. Same SSO setup as the PowerShell scanner (`accounts.json`, `aws sso login`)
 
-### Install and run
+### Step 1 — Create and activate a virtual environment
+
+Use a virtual environment so scanner dependencies stay isolated from the rest of your system.
+
+**Windows (Command Prompt or PowerShell)**
+
+```powershell
+cd AWSAuditScanner
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+If PowerShell blocks script execution, run once as administrator or for your user:
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+Then activate again with `.\.venv\Scripts\Activate.ps1`.
+
+On **Command Prompt** (cmd), activate with:
+
+```bat
+.venv\Scripts\activate.bat
+```
+
+**macOS / Linux**
 
 ```bash
 cd AWSAuditScanner
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+Your shell prompt should show `(.venv)` when the environment is active.
+
+### Step 2 — Install dependencies
+
+With the virtual environment activated:
+
+```bash
+python -m pip install --upgrade pip
 pip install -r requirements.txt
+```
+
+### Step 3 — Authenticate with AWS SSO
+
+```bash
 aws sso login --profile PROD-SEC
+```
+
+Use a profile from your `accounts.json` that shares the same SSO portal.
+
+### Step 4 — Run a scan
+
+```bash
 python scan.py --domain LOG --auditor "Jane Doe"
 ```
 
 **All domains available in Python:** `LOG`, `IAM`, `DET`, `DAT`, `GOV`, `ORG`, `NET`, `CIC`, `BCK`, `INC`, `WRK`
 
 PowerShell (`Invoke-AWSScanner.ps1`) remains available as a fallback with identical output format.
+
+To leave the virtual environment when finished: `deactivate`
 
 ### Python options
 
@@ -91,6 +144,8 @@ Parallel account scanning runs one process per account (safe for per-account `AW
 An **HTML summary report** is written to `output/AuditReport_{Domain}_{timestamp}.html`.
 
 ### Anonymize output (Python)
+
+With the virtual environment activated:
 
 ```bash
 python protect_audit_output.py --force
@@ -268,7 +323,74 @@ A summary table (Passed / Failed / Partial / Not Tested) is printed at the end o
 
 ## Français
 
-### Prérequis
+### Scanner Python (recommandé)
+
+#### Prérequis
+
+1. **Python 3.11+** (testé avec 3.14)
+2. **AWS CLI v2** dans le `PATH`
+3. Même configuration SSO que le scanner PowerShell (`accounts.json`, `aws sso login`)
+
+#### Étape 1 — Créer et activer un environnement virtuel
+
+**Windows (PowerShell)**
+
+```powershell
+cd AWSAuditScanner
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+**Windows (Invite de commandes)**
+
+```bat
+cd AWSAuditScanner
+python -m venv .venv
+.venv\Scripts\activate.bat
+```
+
+**macOS / Linux**
+
+```bash
+cd AWSAuditScanner
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+Le préfixe `(.venv)` doit apparaître dans l'invite de commande.
+
+#### Étape 2 — Installer les dépendances
+
+```bash
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+#### Étape 3 — S'authentifier avec AWS SSO
+
+```bash
+aws sso login --profile PROD-SEC
+```
+
+#### Étape 4 — Lancer un scan
+
+```bash
+python scan.py --domain LOG --auditor "Jean Dupont"
+```
+
+Tous les domaines sont disponibles en Python : `LOG`, `IAM`, `DET`, `DAT`, `GOV`, `ORG`, `NET`, `CIC`, `BCK`, `INC`, `WRK`.
+
+Pour quitter l'environnement virtuel : `deactivate`
+
+#### Anonymiser la sortie
+
+```bash
+python protect_audit_output.py --force
+```
+
+---
+
+### Prérequis (PowerShell)
 
 1. **Windows PowerShell 5.1** (pas PowerShell 7+)
 2. **AWS CLI v2** installé et accessible dans le `PATH`
