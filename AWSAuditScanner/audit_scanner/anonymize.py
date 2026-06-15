@@ -297,7 +297,7 @@ def protect_audit_text(text: str, state: AnonymizationState) -> str:
     result = re.sub(r'"auditor"\s*:\s*"[^"]*"', '"auditor": "[REDACTED]"', result)
     result = re.sub(r'"sso_profile"\s*:\s*"[^"]*"', '"sso_profile": "[REDACTED]"', result)
     result = re.sub(r'"role_arn"\s*:\s*"[^"]*"', '"role_arn": "[REDACTED]"', result)
-    result = re.sub(r"C:\\Users\\[^\\\"\s]+", r"C:\Users\[REDACTED]", result)
+    result = re.sub(r"C:\\Users\\[^\\\"\s]+", r"C:\\Users\\[REDACTED]", result)
     result = re.sub(r"/Users/[^/\"\s]+", "/Users/[REDACTED]", result)
     result = re.sub(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}\b", "[REDACTED-EMAIL]", result)
 
