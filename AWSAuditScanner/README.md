@@ -145,13 +145,56 @@ An **HTML summary report** is written to `output/AuditReport_{Domain}_{timestamp
 
 ### Anonymize output (Python)
 
-With the virtual environment activated:
+With the virtual environment activated, copy scan results to `output/anonymized/` with account IDs and resource identifiers masked. Account **names** stay visible; only 12-digit account IDs are replaced (e.g. `PROD-SEC_ACCT-001`).
+
+**Anonymize everything**
 
 ```bash
 python protect_audit_output.py --force
 ```
 
-Same behavior as `Protect-AuditOutput.ps1`: masks account IDs, keeps account names, redacts resource identifiers.
+**Filter by account** (name or 12-digit ID, comma-separated or repeat `--account`):
+
+```bash
+python protect_audit_output.py --account PROD-SEC --force
+python protect_audit_output.py --account PROD-SEC,PROD-SHARED --force
+```
+
+**Filter by domain** (repeat or comma-separate):
+
+```bash
+python protect_audit_output.py --domain NET --force
+python protect_audit_output.py --domain IAM,INC --force
+```
+
+**Filter by account and domain**
+
+```bash
+python protect_audit_output.py --account PROD-SEC --domain NET --force
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--input-path` | `./output` | Source scan output folder |
+| `--output-path` | auto | Destination (see below) |
+| `--account` | all | Account name or ID to include |
+| `--domain` | all | Domain code (`NET`, `IAM`, …) |
+| `--config-file` | `accounts.json` | Used to resolve account names/IDs |
+| `--mapping-file` | `output/anonymization-map.local.json` | Internal ID map (do not share) |
+| `--force` | off | Overwrite destination if it exists |
+
+**Default destination when filtering**
+
+| Filters | Default output folder |
+|---------|------------------------|
+| none | `output/anonymized/` |
+| account only | `output/anonymized/acct-{name}/` |
+| domain only | `output/anonymized/dom-{DOMAIN}/` |
+| both | `output/anonymized/acct-{name}-dom-{DOMAIN}/` |
+
+Session logs under `output/log/` are included only when **no** account or domain filter is set. HTML reports (`AuditReport_{Domain}_*.html`) follow the domain filter.
+
+Keep `anonymization-map.local.json` internal — it reverses masked account IDs.
 
 ---
 
@@ -287,6 +330,35 @@ output/{AccountName}_{AccountId}/
 
 A summary table (Passed / Failed / Partial / Not Tested) is printed at the end of each run.
 
+### Anonymize output (PowerShell)
+
+Same masking rules as the Python tool: account names preserved, account IDs and resource identifiers redacted.
+
+**Anonymize everything**
+
+```powershell
+.\Protect-AuditOutput.ps1 -Force
+```
+
+**Filter by account and/or domain**
+
+```powershell
+.\Protect-AuditOutput.ps1 -Account PROD-SEC -Domain NET -Force
+.\Protect-AuditOutput.ps1 -Account PROD-SEC,PROD-SHARED -Domain IAM,INC -Force
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `-InputPath` | `./output` | Source scan output folder |
+| `-OutputPath` | auto | Destination (see Python section for naming) |
+| `-Account` | all | Account name or 12-digit ID (repeat or comma-separate) |
+| `-Domain` | all | Domain code to include |
+| `-ConfigFile` | `accounts.json` | Resolves account names/IDs |
+| `-MappingFile` | `output/anonymization-map.local.json` | Internal map — do not share |
+| `-Force` | off | Overwrite destination if it exists |
+
+Or use Python: `python protect_audit_output.py` with the same filter options.
+
 ### Optional parameters
 
 ```powershell
@@ -384,9 +456,49 @@ Pour quitter l'environnement virtuel : `deactivate`
 
 #### Anonymiser la sortie
 
+Copie les résultats vers `output/anonymized/` en masquant les identifiants de compte AWS et les ressources. Les **noms de compte** restent visibles.
+
+**Tout anonymiser**
+
 ```bash
 python protect_audit_output.py --force
 ```
+
+**Filtrer par compte** (nom ou ID à 12 chiffres) :
+
+```bash
+python protect_audit_output.py --account PROD-SEC --force
+python protect_audit_output.py --account PROD-SEC,PROD-SHARED --force
+```
+
+**Filtrer par domaine** :
+
+```bash
+python protect_audit_output.py --domain NET --force
+python protect_audit_output.py --domain IAM,INC --force
+```
+
+**Compte et domaine**
+
+```bash
+python protect_audit_output.py --account PROD-SEC --domain NET --force
+```
+
+| Option | Défaut | Description |
+|--------|--------|-------------|
+| `--input-path` | `./output` | Dossier source |
+| `--output-path` | auto | Destination (`anonymized/`, `anonymized/acct-…-dom-…/`, etc.) |
+| `--account` | tous | Nom ou ID de compte |
+| `--domain` | tous | Code domaine (`NET`, `IAM`, …) |
+| `--force` | off | Écraser la destination |
+
+Équivalent PowerShell :
+
+```powershell
+.\Protect-AuditOutput.ps1 -Account PROD-SEC -Domain NET -Force
+```
+
+Les journaux de session (`output/log/`) ne sont inclus que sans filtre compte/domaine. Ne partagez pas `anonymization-map.local.json`.
 
 ---
 
@@ -507,6 +619,35 @@ output/{AccountName}_{AccountId}/
 **Journal de session** — `output/log/AuditSession_{timestamp}.log` pour l'exécution complète.
 
 Un tableau récapitulatif (Passed / Failed / Partial / Not Tested) s'affiche à la fin de chaque exécution.
+
+### Anonymiser la sortie (PowerShell)
+
+Mêmes règles que l'outil Python : noms de compte conservés, identifiants de compte et ressources masqués.
+
+**Tout anonymiser**
+
+```powershell
+.\Protect-AuditOutput.ps1 -Force
+```
+
+**Filtrer par compte et/ou domaine**
+
+```powershell
+.\Protect-AuditOutput.ps1 -Account PROD-SEC -Domain NET -Force
+.\Protect-AuditOutput.ps1 -Account PROD-SEC,PROD-SHARED -Domain IAM,INC -Force
+```
+
+| Paramètre | Défaut | Description |
+|-----------|--------|-------------|
+| `-InputPath` | `./output` | Dossier source |
+| `-OutputPath` | auto | Destination (voir section Python pour le nommage) |
+| `-Account` | tous | Nom ou ID à 12 chiffres |
+| `-Domain` | tous | Code domaine |
+| `-ConfigFile` | `accounts.json` | Résolution noms/IDs |
+| `-MappingFile` | `output/anonymization-map.local.json` | Carte interne — ne pas partager |
+| `-Force` | off | Écraser la destination |
+
+Équivalent Python : `python protect_audit_output.py` avec les mêmes filtres.
 
 ### Paramètres optionnels
 

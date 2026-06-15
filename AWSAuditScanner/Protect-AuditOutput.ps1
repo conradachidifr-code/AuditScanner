@@ -25,7 +25,9 @@
     Source output folder (default: ./output).
 
 .PARAMETER OutputPath
-    Destination folder for anonymized files (default: ./output/anonymized).
+    Destination folder for anonymized files. Default: output/anonymized when no
+    filters are set; otherwise output/anonymized/acct-{name}/, dom-{DOMAIN}/, or
+    acct-{name}-dom-{DOMAIN}/ depending on -Account and -Domain.
 
 .PARAMETER ConfigFile
     accounts.json used to discover account names, IDs, and profile names.
@@ -37,11 +39,26 @@
 .PARAMETER Force
     Overwrite the output folder if it already exists.
 
+.PARAMETER Account
+    Account name or 12-digit account ID to include. Repeat the parameter or pass a
+    comma-separated list. Default: all accounts in output.
+
+.PARAMETER Domain
+    Domain code to include (LOG, IAM, NET, etc.). Repeat or comma-separate.
+    Default: all domains. Session logs are included only when neither Account nor
+    Domain is specified.
+
 .EXAMPLE
     .\Protect-AuditOutput.ps1
 
 .EXAMPLE
     .\Protect-AuditOutput.ps1 -InputPath .\output -OutputPath .\share\audit-review
+
+.EXAMPLE
+    .\Protect-AuditOutput.ps1 -Account PROD-SEC -Domain NET -Force
+
+.EXAMPLE
+    .\Protect-AuditOutput.ps1 -Account PROD-SEC,PROD-SHARED -Domain IAM,INC -Force
 #>
 
 [CmdletBinding()]
@@ -50,6 +67,8 @@ param(
     [string]$OutputPath,
     [string]$ConfigFile,
     [string]$MappingFile,
+    [string[]]$Account = @(),
+    [string[]]$Domain = @(),
     [switch]$Force
 )
 
@@ -65,10 +84,6 @@ else {
 
 if (-not $InputPath) {
     $InputPath = Join-Path $scriptRoot 'output'
-}
-
-if (-not $OutputPath) {
-    $OutputPath = Join-Path $InputPath 'anonymized'
 }
 
 if (-not $ConfigFile) {
@@ -537,7 +552,9 @@ function Write-AnonymizationMap {
         [string]$Path,
 
         [Parameter(Mandatory = $true)]
-        [string]$AccountsConfigPath
+        [string]$AccountsConfigPath,
+
+        $AccountFilters
     )
 
     $export = [ordered]@{
@@ -551,13 +568,20 @@ function Write-AnonymizationMap {
         if ($config.accounts) {
             foreach ($account in $config.accounts) {
                 $accountId = [string]$account.id
+                $accountName = [string]$account.name
+                if ($null -ne $AccountFilters) {
+                    if (-not (Test-AnonymizationAccountFolderMatch -FolderName ('{0}_{1}' -f $accountName, $accountId) -AccountFilters $AccountFilters)) {
+                        continue
+                    }
+                }
+
                 $pseudonym = ''
                 if ($Script:Anonymization.AccountIdToPseudonym.ContainsKey($accountId)) {
                     $pseudonym = $Script:Anonymization.AccountIdToPseudonym[$accountId]
                 }
 
                 $export.accounts += [ordered]@{
-                    account_name      = [string]$account.name
+                    account_name      = $accountName
                     masked_account_id = $pseudonym
                     real_account_id   = $accountId
                 }
@@ -582,7 +606,260 @@ function Write-AnonymizationMap {
     $export | ConvertTo-Json -Depth 5 | Out-File -FilePath $Path -Encoding UTF8
 }
 
+$Script:ValidAnonymizationDomains = @(
+    'LOG', 'IAM', 'DET', 'DAT', 'GOV', 'ORG', 'NET', 'CIC', 'BCK', 'INC', 'WRK'
+)
+
+function Expand-AnonymizationFilterTokens {
+    param(
+        [string[]]$Values
+    )
+
+    $tokens = @()
+    foreach ($value in @($Values)) {
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            continue
+        }
+        foreach ($part in ($value -split '[,;]')) {
+            $trimmed = $part.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($trimmed)) {
+                $tokens += $trimmed
+            }
+        }
+    }
+    return $tokens
+}
+
+function Get-AnonymizationDomainFilters {
+    param(
+        [string[]]$DomainValues
+    )
+
+    $tokens = Expand-AnonymizationFilterTokens -Values $DomainValues
+    if ($tokens.Count -eq 0) {
+        return $null
+    }
+
+    $normalized = @()
+    foreach ($token in $tokens) {
+        $normalized += [string]$token.ToUpper()
+    }
+
+    $unknown = @($normalized | Where-Object { $Script:ValidAnonymizationDomains -notcontains $_ })
+    if ($unknown.Count -gt 0) {
+        throw ("Unknown domain(s): {0}. Valid domains: {1}" -f ($unknown -join ', '), ($Script:ValidAnonymizationDomains -join ', '))
+    }
+
+    return @($normalized)
+}
+
+function Get-AnonymizationAccountFilters {
+    param(
+        [string[]]$AccountValues,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AccountsConfigPath
+    )
+
+    $tokens = Expand-AnonymizationFilterTokens -Values $AccountValues
+    if ($tokens.Count -eq 0) {
+        return $null
+    }
+
+    $byName = @{}
+    $byId = @{}
+    if (Test-Path -LiteralPath $AccountsConfigPath) {
+        $config = Get-Content -LiteralPath $AccountsConfigPath -Raw | ConvertFrom-Json
+        if ($config.accounts) {
+            foreach ($entry in $config.accounts) {
+                $name = [string]$entry.name
+                $id = [string]$entry.id
+                if ($name) {
+                    $byName[$name.ToLower()] = @{ Name = $name; Id = $id }
+                }
+                if ($id) {
+                    $byId[$id] = @{ Name = $name; Id = $id }
+                }
+            }
+        }
+    }
+
+    $filters = @()
+    foreach ($token in $tokens) {
+        if ($token -match '^\d{12}$') {
+            if ($byId.ContainsKey($token)) {
+                $filters += [PSCustomObject]@{
+                    Name = [string]$byId[$token].Name
+                    Id   = [string]$byId[$token].Id
+                }
+            }
+            else {
+                $filters += [PSCustomObject]@{ Name = ''; Id = $token }
+            }
+            continue
+        }
+
+        $lowerToken = $token.ToLower()
+        if ($byName.ContainsKey($lowerToken)) {
+            $filters += [PSCustomObject]@{
+                Name = [string]$byName[$lowerToken].Name
+                Id   = [string]$byName[$lowerToken].Id
+            }
+        }
+        else {
+            $filters += [PSCustomObject]@{ Name = $token; Id = '' }
+        }
+    }
+
+    return @($filters)
+}
+
+function Get-AnonymizationDomainFromFileName {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FileName
+    )
+
+    if ($FileName -match '^AuditReport_([A-Z]{3})_\d{8}-\d{4}\.html$') {
+        return $Matches[1].ToUpper()
+    }
+    if ($FileName -match '^(?:AuditDiagnostics_)?([A-Z]{3})_\d{8}-\d{4}(?:_evidence)?\.(?:json|log)$') {
+        return $Matches[1].ToUpper()
+    }
+
+    return $null
+}
+
+function Test-AnonymizationAccountFolderMatch {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FolderName,
+
+        [Parameter(Mandatory = $true)]
+        [array]$AccountFilters
+    )
+
+    if ($FolderName -notmatch '^(.+)_(\d{12})$') {
+        return $false
+    }
+
+    $folderName = $Matches[1]
+    $folderId = $Matches[2]
+
+    foreach ($filter in $AccountFilters) {
+        $nameOk = [string]::IsNullOrWhiteSpace([string]$filter.Name) -or (
+            [string]$filter.Name -ieq $folderName
+        )
+        $idOk = [string]::IsNullOrWhiteSpace([string]$filter.Id) -or (
+            [string]$filter.Id -eq $folderId
+        )
+        if ($nameOk -and $idOk) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Test-AnonymizationFileIncluded {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RelativePath,
+
+        $AccountFilters,
+        $DomainFilters
+    )
+
+    $relative = ($RelativePath -replace '\\', '/')
+    if ($relative -like 'anonymized*') {
+        return $false
+    }
+
+    $parts = @($relative -split '/')
+    if ($parts.Count -eq 0) {
+        return $false
+    }
+
+    $baseName = $parts[$parts.Count - 1]
+
+    if ($parts.Count -eq 1 -and $baseName -like 'AuditReport_*') {
+        $domain = Get-AnonymizationDomainFromFileName -FileName $baseName
+        if ($null -eq $DomainFilters) {
+            return $null -eq $AccountFilters
+        }
+        return ($null -ne $domain) -and ($DomainFilters -contains $domain)
+    }
+
+    if ($parts[0] -eq 'log') {
+        return ($null -eq $AccountFilters) -and ($null -eq $DomainFilters)
+    }
+
+    if ($parts[0] -notmatch '^(.+)_(\d{12})$') {
+        return $false
+    }
+
+    if ($null -ne $AccountFilters) {
+        if (-not (Test-AnonymizationAccountFolderMatch -FolderName $parts[0] -AccountFilters $AccountFilters)) {
+            return $false
+        }
+    }
+
+    if ($null -eq $DomainFilters) {
+        return $true
+    }
+
+    $fileDomain = Get-AnonymizationDomainFromFileName -FileName $baseName
+    return ($null -ne $fileDomain) -and ($DomainFilters -contains $fileDomain)
+}
+
+function Get-AnonymizationDefaultOutputPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InputPath,
+
+        $AccountFilters,
+        $DomainFilters
+    )
+
+    if (($null -eq $AccountFilters) -and ($null -eq $DomainFilters)) {
+        return (Join-Path $InputPath 'anonymized')
+    }
+
+    $suffixParts = @()
+    if ($null -ne $AccountFilters) {
+        $labels = @()
+        foreach ($filter in $AccountFilters) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$filter.Name)) {
+                $labels += [string]$filter.Name
+            }
+            elseif (-not [string]::IsNullOrWhiteSpace([string]$filter.Id)) {
+                $labels += [string]$filter.Id
+            }
+            else {
+                $labels += 'account'
+            }
+        }
+        $suffixParts += ('acct-' + (($labels | Sort-Object) -join '-'))
+    }
+
+    if ($null -ne $DomainFilters) {
+        $suffixParts += ('dom-' + (($DomainFilters | Sort-Object) -join '-'))
+    }
+
+    return (Join-Path $InputPath ('anonymized\' + ($suffixParts -join '-')))
+}
+
 # --- Main ---
+
+if (-not $OutputPath) {
+    $OutputPath = Get-AnonymizationDefaultOutputPath `
+        -InputPath $InputPath `
+        -AccountFilters (Get-AnonymizationAccountFilters -AccountValues $Account -AccountsConfigPath $ConfigFile) `
+        -DomainFilters (Get-AnonymizationDomainFilters -DomainValues $Domain)
+}
+
+$accountFilters = Get-AnonymizationAccountFilters -AccountValues $Account -AccountsConfigPath $ConfigFile
+$domainFilters = Get-AnonymizationDomainFilters -DomainValues $Domain
 
 if (-not (Test-Path -LiteralPath $InputPath)) {
     Write-Error "Input path not found: $InputPath"
@@ -607,14 +884,16 @@ if ($Script:Anonymization.AccountIdToPseudonym.Count -eq 0) {
 $inputRoot = (Resolve-Path -LiteralPath $InputPath).Path
 $files = Get-ChildItem -LiteralPath $inputRoot -Recurse -File |
     Where-Object {
-        $_.Extension -in @('.json', '.log', '.txt') -and
+        $_.Extension -in @('.json', '.log', '.txt', '.html') -and
         $_.Name -notlike 'anonymization-map*.json'
     }
 
 $processedCount = 0
+$skippedCount = 0
 foreach ($file in $files) {
     $relativePath = $file.FullName.Substring($inputRoot.Length).TrimStart('\', '/')
-    if ($relativePath -like 'anonymized*' -or $relativePath -like 'anonymized/*' -or $relativePath -like 'anonymized\*') {
+    if (-not (Test-AnonymizationFileIncluded -RelativePath $relativePath -AccountFilters $accountFilters -DomainFilters $domainFilters)) {
+        $skippedCount++
         continue
     }
 
@@ -632,14 +911,41 @@ foreach ($file in $files) {
     $processedCount++
 }
 
-Write-AnonymizationMap -Path $MappingFile -AccountsConfigPath $ConfigFile
+if ($processedCount -eq 0) {
+    Write-Error 'No files matched the selected account/domain filters. Check folder names ({AccountName}_{AccountId}) and scan artifacts.'
+    exit 1
+}
+
+Write-AnonymizationMap -Path $MappingFile -AccountsConfigPath $ConfigFile -AccountFilters $accountFilters
 
 Write-Host '===================================='
 Write-Host 'Audit output anonymized'
 Write-Host ('Source      : {0}' -f $inputRoot)
 Write-Host ('Destination : {0}' -f $OutputPath)
+if ($null -ne $accountFilters) {
+    $accountLabels = @()
+    foreach ($filter in $accountFilters) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$filter.Name)) {
+            $accountLabels += [string]$filter.Name
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace([string]$filter.Id)) {
+            $accountLabels += [string]$filter.Id
+        }
+    }
+    Write-Host ('Accounts    : {0}' -f ($accountLabels -join ', '))
+}
+else {
+    Write-Host 'Accounts    : all'
+}
+if ($null -ne $domainFilters) {
+    Write-Host ('Domains     : {0}' -f ($domainFilters -join ', '))
+}
+else {
+    Write-Host 'Domains     : all'
+}
 Write-Host ('Files       : {0}' -f $processedCount)
-Write-Host ('Accounts    : {0}' -f $Script:Anonymization.AccountIdToPseudonym.Count)
+Write-Host ('Skipped     : {0}' -f $skippedCount)
+Write-Host ('Mapped IDs  : {0}' -f $Script:Anonymization.AccountIdToPseudonym.Count)
 Write-Host ('Mapping     : {0}' -f $MappingFile)
 Write-Host ''
 Write-Host 'Share only the anonymized folder with the AI evaluator.'
