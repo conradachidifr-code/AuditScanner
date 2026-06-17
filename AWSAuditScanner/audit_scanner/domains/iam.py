@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 import urllib.parse
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
@@ -357,8 +358,31 @@ def _iam_roles_anywhere_not_detected_result(
         control_id,
         "NOT_TESTED",
         None,
-        "IAM Roles Anywhere not detected in this account",
+        "IAM Roles Anywhere API unavailable, access denied, or not in use in this account",
     )
+
+
+def _get_iam_credential_report(ctx: CheckContext) -> dict[str, Any] | None:
+    generate_data = ctx.invoke_aws_cli(["iam", "generate-credential-report"])
+    if generate_data is None:
+        return None
+
+    for _ in range(10):
+        state = str(property_value(generate_data, ["State"]) or "")
+        if state == "COMPLETE":
+            report_data = ctx.invoke_aws_cli(["iam", "get-credential-report"])
+            generated_time = None
+            if report_data and has_property(report_data, "GeneratedTime"):
+                generated_time = str(property_value(report_data, ["GeneratedTime"]) or "")
+            return {"state": state, "report": report_data, "generated_time": generated_time}
+        if state == "FAILED":
+            return {"state": state, "report": None, "generated_time": None}
+        time.sleep(2)
+        generate_data = ctx.invoke_aws_cli(["iam", "generate-credential-report"])
+        if generate_data is None:
+            return None
+
+    return {"state": "TIMEOUT", "report": None, "generated_time": None}
 
 
 def get_domain() -> DomainModule:
@@ -1274,7 +1298,7 @@ def get_domain() -> DomainModule:
         account_id: str, account_name: str, region: str, control_id: str, ctx: CheckContext
     ) -> tuple[AuditResult | None, dict[str, Any] | None]:
         context = _iam_roles_anywhere_context(ctx)
-        if context is None or not has_property(context, "Detected"):
+        if context is None:
             return _iam_roles_anywhere_not_detected_result(account_id, account_name, region, control_id, ctx), None
         return None, context
 
@@ -1653,14 +1677,12 @@ def get_domain() -> DomainModule:
         gate = _iam_global_control_gate(account_id, account_name, region, "IAM-41", ctx)
         if gate:
             return gate
-        generate_data = ctx.invoke_aws_cli(["iam", "generate-credential-report"])
-        if generate_data is None:
+        credential_report = _get_iam_credential_report(ctx)
+        if credential_report is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "IAM-41")
-        state = str(property_value(generate_data, ["State"]) or "") if has_property(generate_data, "State") else None
-        report_data = ctx.invoke_aws_cli(["iam", "get-credential-report"])
-        generated_date = None
-        if report_data and has_property(report_data, "GeneratedTime"):
-            generated_date = str(property_value(report_data, ["GeneratedTime"]) or "")
+        state = str(credential_report.get("state") or "")
+        report_data = credential_report.get("report")
+        generated_date = credential_report.get("generated_time")
         evidence = {"generation_state": state, "generated_time": generated_date}
         if report_data:
             return ctx.results.audit_result(
@@ -1672,9 +1694,13 @@ def get_domain() -> DomainModule:
                 evidence,
                 "Credential report generated successfully",
             )
-        return ctx.results.audit_result(
-            account_id, account_name, region, "IAM-41", "FAIL", evidence, "Cannot generate credential report"
-        )
+        if state == "TIMEOUT":
+            notes = "Credential report generation did not complete within polling window"
+        elif state == "FAILED":
+            notes = "Credential report generation failed"
+        else:
+            notes = "Cannot generate credential report"
+        return ctx.results.audit_result(account_id, account_name, region, "IAM-41", "FAIL", evidence, notes)
 
     checks["IAM-41"] = iam41
     checks["IAM-42"] = workshop(

@@ -173,55 +173,13 @@ def get_domain() -> DomainModule:
 
         return _check
 
-    def wrk02(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
-        summary = _wrk_tagged_resource_summary(ctx)
-        if summary is None:
-            return ctx.results.null_api_partial(account_id, account_name, region, "WRK-02")
-        return ctx.results.audit_result(
-            account_id,
-            account_name,
-            region,
-            "WRK-02",
-            "PARTIAL",
-            {
-                "resource_count": summary["resource_count"],
-                "service_types": summary["service_types"],
-            },
-            "Inventory completeness depends on tagging compliance.",
-        )
-
-    checks["WRK-02"] = wrk02
-
-    def wrk03(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
-        data = ctx.invoke_aws_cli(["iam", "list-roles", "--max-items", "1000"])
-        if data is None:
-            return ctx.results.null_api_partial(account_id, account_name, region, "WRK-03")
-
-        workload_roles: list[str] = []
-        role_count = 0
-        if has_property(data, "Roles"):
-            roles = cli_array(data.get("Roles"))
-            role_count = collection_count(roles)
-            for role in roles:
-                role_name = str(property_value(role, ["RoleName"]) or "")
-                if re.search(r"workload|app|svc|service|lambda|ecs|eks", role_name, re.IGNORECASE):
-                    if collection_count(workload_roles) < 10:
-                        workload_roles.append(role_name)
-
-        return ctx.results.audit_result(
-            account_id,
-            account_name,
-            region,
-            "WRK-03",
-            "PARTIAL",
-            {
-                "role_count": role_count,
-                "workload_roles": workload_roles,
-            },
-            "Verify each Lambda, ECS task, EC2 instance profile is dedicated.",
-        )
-
-    checks["WRK-03"] = wrk03
+    checks["WRK-02"] = workshop(
+        "WRK-02", "Verify workload resource inventory completeness and tagging coverage."
+    )
+    checks["WRK-03"] = workshop(
+        "WRK-03",
+        "Verify each Lambda, ECS task, and EC2 instance profile uses a dedicated IAM role.",
+    )
 
     def wrk04(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
         string_count = _wrk_ssm_string_parameter_count(ctx)
@@ -444,18 +402,9 @@ def get_domain() -> DomainModule:
         "WRK-10", "Verify Lambda, ECS, EKS events flow to QRadar via EventBridge."
     )
 
-    def wrk11(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
-        return ctx.results.audit_result(
-            account_id,
-            account_name,
-            region,
-            "WRK-11",
-            "PARTIAL",
-            None,
-            "Verify service quotas and Lambda concurrency limits configured.",
-        )
-
-    checks["WRK-11"] = wrk11
+    checks["WRK-11"] = workshop(
+        "WRK-11", "Verify service quotas and Lambda concurrency limits are configured."
+    )
     checks["WRK-12"] = workshop("WRK-12", "Verify anomaly detection for service usage.")
     checks["WRK-13"] = workshop("WRK-13", "Verify service dependency map in DAT/SIPedia.")
     checks["WRK-14"] = workshop("WRK-14", "Verify runbooks for Lambda, ECS, EKS, RDS in DEX.")
@@ -1116,94 +1065,9 @@ def get_domain() -> DomainModule:
 
     checks["WRK-24"] = wrk24
 
-    def wrk25(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
-        api_data = ctx.invoke_aws_cli(["apigateway", "get-rest-apis"])
-        if api_data is None:
-            return ctx.results.null_api_partial(account_id, account_name, region, "WRK-25")
-
-        apis: list[dict[str, Any]] = []
-        if has_property(api_data, "items"):
-            apis = cli_array(api_data.get("items"))
-        if collection_count(apis) == 0:
-            return ctx.results.audit_result(
-                account_id,
-                account_name,
-                region,
-                "WRK-25",
-                "PARTIAL",
-                {"api_count": 0},
-                "No REST APIs found in region",
-            )
-
-        stage_count = 0
-        stages_with_throttling = 0
-        for api in apis:
-            api_id = str(property_value(api, ["id"]) or "")
-            if not api_id:
-                continue
-            stage_data = ctx.invoke_aws_cli(["apigateway", "get-stages", "--rest-api-id", api_id])
-            if stage_data is None or not has_property(stage_data, "item"):
-                continue
-
-            for stage in cli_array(stage_data.get("item")):
-                stage_count += 1
-                has_throttling = False
-
-                method_settings = property_value(stage, ["methodSettings"])
-                if isinstance(method_settings, dict):
-                    for setting in method_settings.values():
-                        burst = property_value(setting, ["throttlingBurstLimit"])
-                        rate = property_value(setting, ["throttlingRateLimit"])
-                        if burst or rate:
-                            has_throttling = True
-                            break
-
-                default_route_settings = property_value(stage, ["defaultRouteSettings"])
-                if default_route_settings:
-                    burst = property_value(default_route_settings, ["throttlingBurstLimit"])
-                    rate = property_value(default_route_settings, ["throttlingRateLimit"])
-                    if burst or rate:
-                        has_throttling = True
-
-                if has_throttling:
-                    stages_with_throttling += 1
-
-        evidence = {
-            "api_count": collection_count(apis),
-            "stage_count": stage_count,
-            "stages_with_throttling": stages_with_throttling,
-        }
-        if stage_count == 0:
-            return ctx.results.audit_result(
-                account_id,
-                account_name,
-                region,
-                "WRK-25",
-                "PARTIAL",
-                evidence,
-                "No API stages found",
-            )
-        if stages_with_throttling == stage_count:
-            return ctx.results.audit_result(
-                account_id,
-                account_name,
-                region,
-                "WRK-25",
-                "PASS",
-                evidence,
-                "All API stages have throttling configured",
-            )
-        return ctx.results.audit_result(
-            account_id,
-            account_name,
-            region,
-            "WRK-25",
-            "FAIL",
-            evidence,
-            "One or more API stages lack throttling configuration",
-        )
-
-    checks["WRK-25"] = wrk25
+    checks["WRK-25"] = workshop(
+        "WRK-25", "Verify API Gateway throttling and WAF protection for public APIs."
+    )
 
     def wrk26(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
         list_data = ctx.invoke_aws_cli(["cognito-idp", "list-user-pools", "--max-results", "10"])

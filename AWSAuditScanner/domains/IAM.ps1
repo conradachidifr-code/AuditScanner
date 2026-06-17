@@ -431,8 +431,11 @@ function Get-IamPermissionSetDetails {
                     '--permission-set-arn', $permissionSetArn
                 ) -Region $Region
 
-                if ($describeData -and $describeData.PermissionSet) {
-                    $permissionSets += $describeData.PermissionSet
+                if ($describeData) {
+                    $permissionSet = Get-AuditPropertyValue $describeData -PropertyNames @('PermissionSet')
+                    if ($null -ne $permissionSet) {
+                        $permissionSets += $permissionSet
+                    }
                 }
             }
         }
@@ -497,13 +500,13 @@ function Get-IamRolesAnywhereContext {
     }
 
     $anchors = @()
-    if ($anchorData -and $anchorData.TrustAnchors) {
-        $anchors = @($anchorData.TrustAnchors)
+    if ($anchorData -and (Test-AuditHasProperty -Object $anchorData -PropertyName 'TrustAnchors')) {
+        $anchors = @(Get-AuditCliArray $anchorData.TrustAnchors)
     }
 
     $profiles = @()
-    if ($profileData -and $profileData.Profiles) {
-        $profiles = @($profileData.Profiles)
+    if ($profileData -and (Test-AuditHasProperty -Object $profileData -PropertyName 'Profiles')) {
+        $profiles = @(Get-AuditCliArray $profileData.Profiles)
     }
 
     return [PSCustomObject]@{
@@ -528,11 +531,56 @@ function New-IamRolesAnywhereNotDetectedResult {
         -ControlId $ControlId `
         -Status 'NOT_TESTED' `
         -Evidence $null `
-        -Notes 'IAM Roles Anywhere not detected in this account'
+        -Notes 'IAM Roles Anywhere API unavailable, access denied, or not in use in this account'
+}
+
+function Get-IamCredentialReport {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Region
+    )
+
+    $generateData = Invoke-AWSCLI -Arguments @('iam', 'generate-credential-report') -Region $Region
+    if ($null -eq $generateData) {
+        return $null
+    }
+
+    for ($attempt = 0; $attempt -lt 10; $attempt++) {
+        $state = [string](Get-AuditPropertyValue $generateData -PropertyNames @('State'))
+
+        if ($state -eq 'COMPLETE') {
+            $reportData = Invoke-AWSCLI -Arguments @('iam', 'get-credential-report') -Region $Region
+            return @{
+                State      = $state
+                Report     = $reportData
+                GeneratedTime = if ($reportData) { [string](Get-AuditPropertyValue $reportData -PropertyNames @('GeneratedTime')) } else { $null }
+            }
+        }
+
+        if ($state -eq 'FAILED') {
+            return @{
+                State         = $state
+                Report        = $null
+                GeneratedTime = $null
+            }
+        }
+
+        Start-Sleep -Seconds 2
+        $generateData = Invoke-AWSCLI -Arguments @('iam', 'generate-credential-report') -Region $Region
+        if ($null -eq $generateData) {
+            return $null
+        }
+    }
+
+    return @{
+        State         = 'TIMEOUT'
+        Report        = $null
+        GeneratedTime = $null
+    }
 }
 
 function Get-DomainChecks {
-    return [ordered]@{
+    $checks = [ordered]@{
         'IAM-01' = {
             param([string]$AccountId, [string]$AccountName, [string]$Region)
 
@@ -760,8 +808,9 @@ function Get-DomainChecks {
                 foreach ($permissionSet in $permissionSets) {
                     $permissionSetCount++
                     $duration = 'PT1H'
-                    if (Test-AuditHasProperty -Object $permissionSet -PropertyName 'SessionDuration') {
-                        $duration = [string]$permissionSet.SessionDuration
+                    $durationValue = Get-AuditPropertyValue $permissionSet -PropertyNames @('SessionDuration')
+                    if (-not [string]::IsNullOrWhiteSpace([string]$durationValue)) {
+                        $duration = [string]$durationValue
                     }
 
                     if (-not $durationBuckets.ContainsKey($duration)) {
@@ -1114,21 +1163,23 @@ function Get-DomainChecks {
 
             $analyzers = @()
             if (Test-AuditHasProperty -Object $data -PropertyName 'analyzers') {
-                $analyzers = @($data.analyzers)
+                $analyzers = @(Get-AuditCliArray $data.analyzers)
             }
 
             $orgAnalyzers = @()
             $accountAnalyzers = @()
             foreach ($analyzer in $analyzers) {
+                $analyzerType = [string](Get-AuditPropertyValue $analyzer -PropertyNames @('type'))
+                $analyzerStatus = [string](Get-AuditPropertyValue $analyzer -PropertyNames @('status'))
                 $record = @{
-                    name   = [string]$analyzer.name
-                    type   = [string]$analyzer.type
-                    status = [string]$analyzer.status
+                    name   = [string](Get-AuditPropertyValue $analyzer -PropertyNames @('name'))
+                    type   = $analyzerType
+                    status = $analyzerStatus
                 }
-                if ($analyzer.type -eq 'ORGANIZATION' -and $analyzer.status -eq 'ACTIVE') {
+                if ($analyzerType -eq 'ORGANIZATION' -and $analyzerStatus -eq 'ACTIVE') {
                     $orgAnalyzers += $record
                 }
-                if ($analyzer.type -eq 'ACCOUNT') {
+                if ($analyzerType -eq 'ACCOUNT') {
                     $accountAnalyzers += $record
                 }
             }
@@ -1485,7 +1536,7 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $context = Get-IamRolesAnywhereContext -Region $Region
-            if ($null -eq $context -or -not (Test-AuditHasProperty -Object $context -PropertyName 'Detected')) {
+            if ($null -eq $context) {
                 return New-IamRolesAnywhereNotDetectedResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-28'
             }
 
@@ -1501,7 +1552,7 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $context = Get-IamRolesAnywhereContext -Region $Region
-            if ($null -eq $context -or -not (Test-AuditHasProperty -Object $context -PropertyName 'Detected')) {
+            if ($null -eq $context) {
                 return New-IamRolesAnywhereNotDetectedResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-29'
             }
 
@@ -1522,7 +1573,7 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $context = Get-IamRolesAnywhereContext -Region $Region
-            if ($null -eq $context -or -not (Test-AuditHasProperty -Object $context -PropertyName 'Detected')) {
+            if ($null -eq $context) {
                 return New-IamRolesAnywhereNotDetectedResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-30'
             }
 
@@ -1538,7 +1589,7 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $context = Get-IamRolesAnywhereContext -Region $Region
-            if ($null -eq $context -or -not (Test-AuditHasProperty -Object $context -PropertyName 'Detected')) {
+            if ($null -eq $context) {
                 return New-IamRolesAnywhereNotDetectedResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-31'
             }
 
@@ -1584,7 +1635,7 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $context = Get-IamRolesAnywhereContext -Region $Region
-            if ($null -eq $context -or -not (Test-AuditHasProperty -Object $context -PropertyName 'Detected')) {
+            if ($null -eq $context) {
                 return New-IamRolesAnywhereNotDetectedResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-32'
             }
 
@@ -1627,7 +1678,7 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $context = Get-IamRolesAnywhereContext -Region $Region
-            if ($null -eq $context -or -not (Test-AuditHasProperty -Object $context -PropertyName 'Detected')) {
+            if ($null -eq $context) {
                 return New-IamRolesAnywhereNotDetectedResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-33'
             }
 
@@ -1645,7 +1696,7 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $context = Get-IamRolesAnywhereContext -Region $Region
-            if ($null -eq $context -or -not (Test-AuditHasProperty -Object $context -PropertyName 'Detected')) {
+            if ($null -eq $context) {
                 return New-IamRolesAnywhereNotDetectedResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-34'
             }
 
@@ -1663,7 +1714,7 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $context = Get-IamRolesAnywhereContext -Region $Region
-            if ($null -eq $context -or -not (Test-AuditHasProperty -Object $context -PropertyName 'Detected')) {
+            if ($null -eq $context) {
                 return New-IamRolesAnywhereNotDetectedResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-35'
             }
 
@@ -1704,7 +1755,7 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $context = Get-IamRolesAnywhereContext -Region $Region
-            if ($null -eq $context -or -not (Test-AuditHasProperty -Object $context -PropertyName 'Detected')) {
+            if ($null -eq $context) {
                 return New-IamRolesAnywhereNotDetectedResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-36'
             }
 
@@ -1722,7 +1773,7 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $context = Get-IamRolesAnywhereContext -Region $Region
-            if ($null -eq $context -or -not (Test-AuditHasProperty -Object $context -PropertyName 'Detected')) {
+            if ($null -eq $context) {
                 return New-IamRolesAnywhereNotDetectedResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-37'
             }
 
@@ -1762,7 +1813,7 @@ function Get-DomainChecks {
             if ($gate) { return $gate }
 
             $context = Get-IamRolesAnywhereContext -Region $Region
-            if ($null -eq $context -or -not (Test-AuditHasProperty -Object $context -PropertyName 'Detected')) {
+            if ($null -eq $context) {
                 return New-IamRolesAnywhereNotDetectedResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-38'
             }
 
@@ -1869,21 +1920,14 @@ function Get-DomainChecks {
             $gate = Get-IamGlobalControlGate -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-41'
             if ($gate) { return $gate }
 
-            $generateData = Invoke-AWSCLI -Arguments @('iam', 'generate-credential-report') -Region $Region
-            if ($null -eq $generateData) {
+            $credentialReport = Get-IamCredentialReport -Region $Region
+            if ($null -eq $credentialReport) {
                 return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-41'
             }
 
-            $state = $null
-            if ((Test-AuditHasProperty -Object $generateData -PropertyName 'State')) {
-                $state = [string]$generateData.State
-            }
-
-            $reportData = Invoke-AWSCLI -Arguments @('iam', 'get-credential-report') -Region $Region
-            $generatedDate = $null
-            if ($reportData -and $reportData.GeneratedTime) {
-                $generatedDate = [string]$reportData.GeneratedTime
-            }
+            $state = [string]$credentialReport.State
+            $reportData = $credentialReport.Report
+            $generatedDate = $credentialReport.GeneratedTime
 
             $evidence = @{
                 generation_state = $state
@@ -1896,9 +1940,17 @@ function Get-DomainChecks {
                     -Status 'PASS' -Evidence $evidence -Notes 'Credential report generated successfully'
             }
 
+            $notes = if ($state -eq 'TIMEOUT') {
+                'Credential report generation did not complete within polling window'
+            } elseif ($state -eq 'FAILED') {
+                'Credential report generation failed'
+            } else {
+                'Cannot generate credential report'
+            }
+
             return New-AuditResult `
                 -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'IAM-41' `
-                -Status 'FAIL' -Evidence $evidence -Notes 'Cannot generate credential report'
+                -Status 'FAIL' -Evidence $evidence -Notes $notes
         }
 
         'IAM-42' = {
@@ -2207,8 +2259,9 @@ function Get-DomainChecks {
                 foreach ($permissionSet in $permissionSets) {
                     $permissionSetCount++
                     $duration = 'PT1H'
-                    if (Test-AuditHasProperty -Object $permissionSet -PropertyName 'SessionDuration') {
-                        $duration = [string]$permissionSet.SessionDuration
+                    $durationValue = Get-AuditPropertyValue $permissionSet -PropertyNames @('SessionDuration')
+                    if (-not [string]::IsNullOrWhiteSpace([string]$durationValue)) {
+                        $duration = [string]$durationValue
                     }
 
                     if (-not $durationBuckets.ContainsKey($duration)) {
@@ -2348,4 +2401,10 @@ function Get-DomainChecks {
                 -Status 'FAIL' -Evidence $evidence -Notes 'No SSO-specific alerting rules found'
         }
     }
+
+    if ($checks.Count -ne 53) {
+        throw ('Get-DomainChecks expected 53 controls but defined {0}' -f $checks.Count)
+    }
+
+    return $checks
 }

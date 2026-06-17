@@ -202,438 +202,332 @@ function Get-CicCloudFormationStackCount {
     return 0
 }
 
-function Get-DomainChecks {
-    return [ordered]@{
-        'CIC-01' = {
-            param([string]$AccountId, [string]$AccountName, [string]$Region)
 
-            $stackCount = Get-CicCloudFormationStackCount -Region $Region
-            if ($null -eq $stackCount) {
-                return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-01'
-            }
-
-            return New-AuditResult `
-                -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-01' `
-                -Status 'PARTIAL' `
-                -Evidence @{ stack_count = $stackCount } `
-                -Notes 'IaC-only deployment to verify during workshop. Verify no untracked console-created resources.'
-        }
-
-        'CIC-02' = {
-            param([string]$AccountId, [string]$AccountName, [string]$Region)
-
-            return New-WorkshopControlResult `
-                -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-02' `
-                -Notes 'Verify IaC repos versioned via GitLab tags/releases.'
-        }
-
-        'CIC-03' = {
-            param([string]$AccountId, [string]$AccountName, [string]$Region)
-
-            return New-WorkshopControlResult `
-                -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-03' `
-                -Notes 'Verify merge request process with peer review. Check GitLab branch protection.'
-        }
-
-        'CIC-04' = {
-            param([string]$AccountId, [string]$AccountName, [string]$Region)
-
-            return New-WorkshopControlResult `
-                -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-04' `
-                -Notes 'Verify separate pipeline definitions for prod vs non-prod.'
-        }
-
-        'CIC-06' = {
-            param([string]$AccountId, [string]$AccountName, [string]$Region)
-
-            $ssmStats = Get-CicSsmStringParameterCount -Region $Region
-            $keyStats = Get-CicActiveAccessKeyCount -Region $Region
-
-            if ($null -eq $ssmStats -and $null -eq $keyStats) {
-                return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-06'
-            }
-
-            $stringParamCount = 0
-            if ($ssmStats) {
-                $stringParamCount = [int]$ssmStats.string_count
-            }
-
-            $activeKeyCount = 0
-            if ($keyStats) {
-                $activeKeyCount = [int]$keyStats.active_access_key_count
-            }
-
-            $evidence = @{
-                ssm_string_parameter_count = $stringParamCount
-                active_access_key_count    = $activeKeyCount
-                users_with_keys            = @()
-            }
-
-            if ($keyStats -and $keyStats.users_with_keys) {
-                $evidence.users_with_keys = @($keyStats.users_with_keys)
-            }
-
-            if ($stringParamCount -gt 0 -or $activeKeyCount -gt 0) {
-                return New-AuditResult `
-                    -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-06' `
-                    -Status 'FAIL' -Evidence $evidence -Notes 'SSM String parameters or IAM access keys found'
-            }
-
-            return New-AuditResult `
-                -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-06' `
-                -Status 'PASS' -Evidence $evidence -Notes 'No SSM String parameters or active IAM access keys found'
-        }
-
-        'CIC-07' = {
-            param([string]$AccountId, [string]$AccountName, [string]$Region)
-
-            return New-WorkshopControlResult `
-                -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-07' `
-                -Notes 'Verify Checkov/KICS integrated in GitLab CI pipeline.'
-        }
-
-        'CIC-08' = {
-            param([string]$AccountId, [string]$AccountName, [string]$Region)
-
-            return New-WorkshopControlResult `
-                -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-08' `
-                -Notes 'GitLab Ultimate enforcement planned October 2026. Verify current status.'
-        }
-
-        'CIC-09' = {
-            param([string]$AccountId, [string]$AccountName, [string]$Region)
-
-            $bucketNames = Get-CicS3BucketNames -Region $Region
-            if ($null -eq $bucketNames) {
-                return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-09'
-            }
-
-            $stateBuckets = @()
-            foreach ($bucketName in $bucketNames) {
-                $lowerName = $bucketName.ToLower()
-                if ($lowerName -match 'tfstate|terraform|iac-state|cloudformation') {
-                    $stateBuckets += $bucketName
-                }
-            }
-
-            if ((Get-AuditCollectionCount $stateBuckets) -eq 0) {
-                $stackCount = Get-CicCloudFormationStackCount -Region $Region
-                return New-AuditResult `
-                    -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-09' `
-                    -Status 'PARTIAL' `
-                    -Evidence @{
-                        state_bucket_count = 0
-                        stack_count        = $stackCount
-                    } `
-                    -Notes 'CloudFormation used (stateless) or state bucket not identified by naming'
-            }
-
-            $bucketEvidence = @()
-            $allPass = $true
-
-            foreach ($bucketName in $stateBuckets) {
-                $encrypted = Test-CicS3BucketEncrypted -Region $Region -BucketName $bucketName
-                $private = Test-CicS3BucketPublicAccessBlocked -Region $Region -BucketName $bucketName
-                $versioned = Test-CicS3BucketVersioningEnabled -Region $Region -BucketName $bucketName
-
-                $bucketEvidence += @{
-                    bucket_name     = $bucketName
-                    encrypted       = $encrypted
-                    public_blocked  = $private
-                    versioning      = $versioned
-                }
-
-                if (-not ($encrypted -and $private -and $versioned)) {
-                    $allPass = $false
-                }
-            }
-
-            $evidence = @{
-                state_bucket_count = (Get-AuditCollectionCount $stateBuckets)
-                buckets              = @($bucketEvidence)
-            }
-
-            if ($allPass) {
-                return New-AuditResult `
-                    -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-09' `
-                    -Status 'PASS' -Evidence $evidence -Notes 'IaC state bucket encrypted, private, and versioned'
-            }
-
-            return New-AuditResult `
-                -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-09' `
-                -Status 'FAIL' -Evidence $evidence -Notes 'IaC state bucket missing encryption, public access blocks, or versioning'
-        }
-
-        'CIC-10' = {
-            param([string]$AccountId, [string]$AccountName, [string]$Region)
-
-            $endTime = (Get-Date).ToUniversalTime().ToString('o')
-            $startTime = (Get-Date).AddDays(-30).ToUniversalTime().ToString('o')
-
-            $data = Invoke-AWSCLI -Arguments @(
-                'cloudtrail', 'lookup-events',
-                '--lookup-attributes', 'AttributeKey=EventSource,AttributeValue=cloudformation.amazonaws.com',
-                '--start-time', $startTime,
-                '--end-time', $endTime,
-                '--max-results', '50'
-            ) -Region $Region
-
-            if ($null -eq $data) {
-                return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-10'
-            }
-
-            $eventCount = 0
-            if (Test-AuditHasProperty -Object $data -PropertyName 'Events') {
-                $eventCount = (Get-AuditCollectionCount $data.Events)
-            }
-
-            $evidence = @{ cloudformation_event_count_last_30_days = $eventCount }
-
-            if ($eventCount -gt 0) {
-                return New-AuditResult `
-                    -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-10' `
-                    -Status 'PASS' -Evidence $evidence -Notes 'CloudFormation events visible in CloudTrail'
-            }
-
-            return New-AuditResult `
-                -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-10' `
-                -Status 'FAIL' -Evidence $evidence -Notes 'No CloudFormation events found in CloudTrail sample'
-        }
-
-        'CIC-11' = {
-            param([string]$AccountId, [string]$AccountName, [string]$Region)
-
-            return New-WorkshopControlResult `
-                -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-11' `
-                -Notes 'Verify rollback procedure exists and has been tested.'
-        }
-
-        'CIC-12' = {
-            param([string]$AccountId, [string]$AccountName, [string]$Region)
-
-            $statusData = Invoke-AWSCLI -Arguments @('config', 'describe-configuration-recorder-status') -Region $Region
-            $recorderData = Invoke-AWSCLI -Arguments @('config', 'describe-configuration-recorders') -Region $Region
-
-            if ($null -eq $statusData -and $null -eq $recorderData) {
-                return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-12'
-            }
-
-            $recorderActive = $false
-            $recorderNames = @()
-
-            if ($statusData -and $statusData.ConfigurationRecordersStatus) {
-                foreach ($status in (Get-AuditCliArray $statusData.ConfigurationRecordersStatus)) {
-                    if (Test-AuditHasProperty -Object $status -PropertyName 'name') {
-                        $recorderNames += [string]$status.name
-                    }
-                    if ($status.recording -eq $true) {
-                        $recorderActive = $true
-                    }
-                }
-            }
-
-            $resourceTypes = @()
-            if ($recorderData -and $recorderData.ConfigurationRecorders) {
-                foreach ($recorder in (Get-AuditCliArray $recorderData.ConfigurationRecorders)) {
-                    if ($recorder.recordingGroup -and $recorder.recordingGroup.allSupported -eq $true) {
-                        $resourceTypes += 'ALL_SUPPORTED'
-                    }
-                    elseif ($recorder.recordingGroup -and $recorder.recordingGroup.resourceTypes) {
-                        foreach ($resourceType in $recorder.recordingGroup.resourceTypes) {
-                            $resourceTypes += [string]$resourceType
-                        }
-                    }
-                }
-            }
-
-            $evidence = @{
-                recorder_active  = $recorderActive
-                recorder_names   = @($recorderNames)
-                resource_types   = @($resourceTypes)
-            }
-
-            if ($recorderActive) {
-                return New-AuditResult `
-                    -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-12' `
-                    -Status 'PASS' -Evidence $evidence -Notes 'AWS Config recorder is active for drift detection'
-            }
-
-            return New-AuditResult `
-                -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-12' `
-                -Status 'FAIL' -Evidence $evidence -Notes 'AWS Config recorder is not active'
-        }
-
-        'CIC-13' = {
-            param([string]$AccountId, [string]$AccountName, [string]$Region)
-
-            return New-WorkshopControlResult `
-                -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-13' `
-                -Notes 'Verify GitLab repo access controls and merge rights.'
-        }
-
-        'CIC-14' = {
-            param([string]$AccountId, [string]$AccountName, [string]$Region)
-
-            return New-WorkshopControlResult `
-                -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-14' `
-                -Notes 'Verify main/master branches protected in GitLab.'
-        }
-
-        'CIC-15' = {
-            param([string]$AccountId, [string]$AccountName, [string]$Region)
-
-            $endTime = (Get-Date).ToUniversalTime().ToString('o')
-            $startTime = (Get-Date).AddDays(-7).ToUniversalTime().ToString('o')
-
-            $data = Invoke-AWSCLI -Arguments @(
-                'cloudtrail', 'lookup-events',
-                '--start-time', $startTime,
-                '--end-time', $endTime,
-                '--max-results', '50'
-            ) -Region $Region
-
-            if ($null -eq $data) {
-                return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-15'
-            }
-
-            $sampledEventCount = 0
-            $consoleLikeEvents = 0
-            $sampleEventNames = @()
-
-            if (Test-AuditHasProperty -Object $data -PropertyName 'Events') {
-                $sampledEventCount = (Get-AuditCollectionCount $data.Events)
-                foreach ($event in (Get-AuditCliArray $data.Events)) {
-                    $eventText = [string]$event.CloudTrailEvent
-                    if ($eventText -match 'console\.amazonaws\.com|AWS Console|Console') {
-                        $consoleLikeEvents++
-                        if ((Get-AuditCollectionCount $sampleEventNames) -lt 5 -and $event.EventName) {
-                            $sampleEventNames += [string]$event.EventName
-                        }
-                    }
-                }
-            }
-
-            return New-AuditResult `
-                -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-15' `
-                -Status 'PARTIAL' `
-                -Evidence @{
-                    sampled_event_count   = $sampledEventCount
-                    console_like_events   = $consoleLikeEvents
-                    sample_event_names    = @($sampleEventNames)
-                } `
-                -Notes 'Manual actions allowed but tracked via CloudTrail. Verify IaC enforcement policy.'
-        }
-
-        'CIC-16' = {
-            param([string]$AccountId, [string]$AccountName, [string]$Region)
-
-            return New-WorkshopControlResult `
-                -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-16' `
-                -Notes 'Verify test stage in pipeline (Checkov, KICS, cfn-lint).'
-        }
-
-        'CIC-17' = {
-            param([string]$AccountId, [string]$AccountName, [string]$Region)
-
-            $data = Invoke-AWSCLI -Arguments @('logs', 'describe-log-groups') -Region $Region
-            if ($null -eq $data) {
-                return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-17'
-            }
-
-            $pipelineGroups = @()
-            $groupsWithoutRetention = @()
-
-            if (Test-AuditHasProperty -Object $data -PropertyName 'logGroups') {
-                foreach ($logGroup in (Get-AuditCliArray $data.logGroups)) {
-                    $name = [string]$logGroup.logGroupName
-                    $lowerName = $name.ToLower()
-                    if ($lowerName -notmatch 'pipeline|codebuild|codepipeline|gitlab|ci/|/ci') {
-                        continue
-                    }
-
-                    $retention = $null
-                    if ((Test-AuditHasProperty -Object $logGroup -PropertyName 'retentionInDays')) {
-                        $retention = $logGroup.retentionInDays
-                    }
-
-                    $pipelineGroups += @{
-                        log_group_name   = $name
-                        retention_in_days = $retention
-                    }
-
-                    if ($null -eq $retention) {
-                        if ((Get-AuditCollectionCount $groupsWithoutRetention) -lt 5) {
-                            $groupsWithoutRetention += $name
-                        }
-                    }
-                }
-            }
-
-            $evidence = @{
-                pipeline_log_group_count = (Get-AuditCollectionCount $pipelineGroups)
-                pipeline_log_groups      = @($pipelineGroups)
-                groups_without_retention = @($groupsWithoutRetention)
-            }
-
-            if ((Get-AuditCollectionCount $pipelineGroups) -eq 0) {
-                return New-AuditResult `
-                    -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-17' `
-                    -Status 'PARTIAL' -Evidence $evidence -Notes 'No pipeline-related log groups identified by naming'
-            }
-
-            if ((Get-AuditCollectionCount $groupsWithoutRetention) -eq 0) {
-                return New-AuditResult `
-                    -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-17' `
-                    -Status 'PASS' -Evidence $evidence -Notes 'Pipeline log groups have retention configured'
-            }
-
-            return New-AuditResult `
-                -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-17' `
-                -Status 'FAIL' -Evidence $evidence -Notes 'Pipeline log groups found without retention configured'
-        }
-
-        'CIC-18' = {
-            param([string]$AccountId, [string]$AccountName, [string]$Region)
-
-            return New-WorkshopControlResult `
-                -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-18' `
-                -Notes 'Verify periodic review and cleanup of unused GitLab pipelines.'
-        }
-
-        'CIC-19' = {
-            param([string]$AccountId, [string]$AccountName, [string]$Region)
-
-            $endTime = (Get-Date).ToUniversalTime().ToString('o')
-            $startTime = (Get-Date).AddDays(-30).ToUniversalTime().ToString('o')
-
-            $data = Invoke-AWSCLI -Arguments @(
-                'cloudtrail', 'lookup-events',
-                '--lookup-attributes', 'AttributeKey=EventSource,AttributeValue=codepipeline.amazonaws.com',
-                '--start-time', $startTime,
-                '--end-time', $endTime,
-                '--max-results', '50'
-            ) -Region $Region
-
-            if ($null -eq $data) {
-                return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-19'
-            }
-
-            $eventCount = 0
-            if (Test-AuditHasProperty -Object $data -PropertyName 'Events') {
-                $eventCount = (Get-AuditCollectionCount $data.Events)
-            }
-
-            $evidence = @{ pipeline_event_count_last_30_days = $eventCount }
-
-            if ($eventCount -gt 0) {
-                return New-AuditResult `
-                    -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-19' `
-                    -Status 'PASS' -Evidence $evidence -Notes 'CodePipeline events visible in CloudTrail'
-            }
-
-            return New-AuditResult `
-                -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-19' `
-                -Status 'FAIL' -Evidence $evidence -Notes 'No CodePipeline events found in CloudTrail sample'
-        }
+function Get-CicWorkshopNotes {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ControlId
+    )
+
+    $notesByControl = @{
+        'CIC-01' = 'Verify IaC-only deployment. No untracked console-created resources.'
+        'CIC-02' = 'Verify IaC repos versioned via GitLab tags/releases.'
+        'CIC-03' = 'Verify merge request process with peer review. Check GitLab branch protection.'
+        'CIC-04' = 'Verify separate pipeline definitions for prod vs non-prod.'
+        'CIC-07' = 'Verify Checkov/KICS integrated in GitLab CI pipeline.'
+        'CIC-08' = 'GitLab Ultimate enforcement planned October 2026. Verify current status.'
+        'CIC-11' = 'Verify rollback procedure exists and has been tested.'
+        'CIC-13' = 'Verify GitLab repo access controls and merge rights.'
+        'CIC-14' = 'Verify main/master branches protected in GitLab.'
+        'CIC-15' = 'Manual console changes allowed but tracked via CloudTrail. Verify IaC enforcement policy.'
+        'CIC-16' = 'Verify test stage in pipeline (Checkov, KICS, cfn-lint).'
+        'CIC-18' = 'Verify periodic review and cleanup of unused GitLab pipelines.'
     }
+
+    if (-not $notesByControl.ContainsKey($ControlId)) {
+        throw "Missing workshop notes for control $ControlId"
+    }
+
+    return $notesByControl[$ControlId]
+}
+
+function Get-DomainChecks {
+    $checks = [ordered]@{}
+
+    $checks['CIC-01'] = {
+        param([string]$AccountId, [string]$AccountName, [string]$Region)
+        return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-01' -Status 'NOT_TESTED' -Evidence $null -Notes (Get-CicWorkshopNotes -ControlId 'CIC-01')
+    }
+
+    $checks['CIC-02'] = {
+        param([string]$AccountId, [string]$AccountName, [string]$Region)
+        return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-02' -Status 'NOT_TESTED' -Evidence $null -Notes (Get-CicWorkshopNotes -ControlId 'CIC-02')
+    }
+
+    $checks['CIC-03'] = {
+        param([string]$AccountId, [string]$AccountName, [string]$Region)
+        return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-03' -Status 'NOT_TESTED' -Evidence $null -Notes (Get-CicWorkshopNotes -ControlId 'CIC-03')
+    }
+
+    $checks['CIC-04'] = {
+        param([string]$AccountId, [string]$AccountName, [string]$Region)
+        return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-04' -Status 'NOT_TESTED' -Evidence $null -Notes (Get-CicWorkshopNotes -ControlId 'CIC-04')
+    }
+
+    $checks['CIC-06'] = {
+        param([string]$AccountId, [string]$AccountName, [string]$Region)
+
+        $ssmStats = Get-CicSsmStringParameterCount -Region $Region
+        $keyStats = Get-CicActiveAccessKeyCount -Region $Region
+
+        if ($null -eq $ssmStats -and $null -eq $keyStats) {
+            return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-06'
+        }
+
+        $stringParamCount = 0
+        if ($ssmStats) { $stringParamCount = [int]$ssmStats.string_count }
+
+        $activeKeyCount = 0
+        $usersWithKeys = @()
+        if ($keyStats) {
+            $activeKeyCount = [int]$keyStats.active_access_key_count
+            if ($keyStats.users_with_keys) { $usersWithKeys = @($keyStats.users_with_keys) }
+        }
+
+        $evidence = @{
+            ssm_string_parameter_count = $stringParamCount
+            active_access_key_count    = $activeKeyCount
+            users_with_keys            = @($usersWithKeys)
+        }
+
+        if ($stringParamCount -gt 0 -or $activeKeyCount -gt 0) {
+            return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-06' -Status 'FAIL' -Evidence $evidence -Notes 'String SSM parameters or pipeline IAM access keys found'
+        }
+
+        return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-06' -Status 'PASS' -Evidence $evidence -Notes 'No String SSM parameters or active IAM access keys found'
+    }
+
+    $checks['CIC-07'] = {
+        param([string]$AccountId, [string]$AccountName, [string]$Region)
+        return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-07' -Status 'NOT_TESTED' -Evidence $null -Notes (Get-CicWorkshopNotes -ControlId 'CIC-07')
+    }
+
+    $checks['CIC-08'] = {
+        param([string]$AccountId, [string]$AccountName, [string]$Region)
+        return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-08' -Status 'NOT_TESTED' -Evidence $null -Notes (Get-CicWorkshopNotes -ControlId 'CIC-08')
+    }
+
+    $checks['CIC-09'] = {
+        param([string]$AccountId, [string]$AccountName, [string]$Region)
+
+        $bucketNames = Get-CicS3BucketNames -Region $Region
+        if ($null -eq $bucketNames) {
+            return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-09'
+        }
+
+        $stateBuckets = @()
+        foreach ($bucketName in $bucketNames) {
+            if ($bucketName.ToLower() -match 'terraform|tfstate') {
+                $stateBuckets += $bucketName
+            }
+        }
+
+        if ((Get-AuditCollectionCount $stateBuckets) -eq 0) {
+            return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-09' -Status 'PARTIAL' -Evidence @{ state_bucket_count = 0 } -Notes 'No Terraform state bucket found by naming (may use CloudFormation)'
+        }
+
+        $bucketEvidence = @()
+        $allPass = $true
+
+        foreach ($bucketName in $stateBuckets) {
+            $encrypted = Test-CicS3BucketEncrypted -Region $Region -BucketName $bucketName
+            $private = Test-CicS3BucketPublicAccessBlocked -Region $Region -BucketName $bucketName
+            $versioned = Test-CicS3BucketVersioningEnabled -Region $Region -BucketName $bucketName
+
+            $bucketEvidence += @{
+                bucket_name    = $bucketName
+                encrypted      = $encrypted
+                public_blocked = $private
+                versioning     = $versioned
+            }
+
+            if (-not ($encrypted -and $private -and $versioned)) { $allPass = $false }
+        }
+
+        $evidence = @{
+            state_bucket_count = (Get-AuditCollectionCount $stateBuckets)
+            buckets            = @($bucketEvidence)
+        }
+
+        if ($allPass) {
+            return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-09' -Status 'PASS' -Evidence $evidence -Notes 'Terraform state bucket encrypted, private, and versioned'
+        }
+
+        return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-09' -Status 'FAIL' -Evidence $evidence -Notes 'Terraform state bucket missing encryption, public access blocks, or versioning'
+    }
+
+    $checks['CIC-10'] = {
+        param([string]$AccountId, [string]$AccountName, [string]$Region)
+
+        $endTime = (Get-Date).ToUniversalTime().ToString('o')
+        $startTime = (Get-Date).AddDays(-30).ToUniversalTime().ToString('o')
+
+        $data = Invoke-AWSCLI -Arguments @(
+            'cloudtrail', 'lookup-events',
+            '--lookup-attributes', 'AttributeKey=EventSource,AttributeValue=cloudformation.amazonaws.com',
+            '--start-time', $startTime,
+            '--end-time', $endTime,
+            '--max-results', '50'
+        ) -Region $Region
+
+        if ($null -eq $data) {
+            return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-10'
+        }
+
+        $eventCount = 0
+        $lastEventTime = $null
+        if (Test-AuditHasProperty -Object $data -PropertyName 'Events') {
+            $events = @(Get-AuditCliArray $data.Events)
+            $eventCount = (Get-AuditCollectionCount $events)
+            if ($eventCount -gt 0) {
+                $lastEventTime = [string](Get-AuditPropertyValue $events[0] -PropertyNames @('EventTime'))
+            }
+        }
+
+        $evidence = @{
+            cloudformation_event_count_last_30_days = $eventCount
+            last_event_time                         = $lastEventTime
+        }
+
+        if ($eventCount -gt 0) {
+            return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-10' -Status 'PASS' -Evidence $evidence -Notes 'CloudFormation events visible in CloudTrail'
+        }
+
+        return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-10' -Status 'FAIL' -Evidence $evidence -Notes 'No CloudFormation events found in CloudTrail sample'
+    }
+
+    $checks['CIC-11'] = {
+        param([string]$AccountId, [string]$AccountName, [string]$Region)
+        return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-11' -Status 'NOT_TESTED' -Evidence $null -Notes (Get-CicWorkshopNotes -ControlId 'CIC-11')
+    }
+
+    $checks['CIC-12'] = {
+        param([string]$AccountId, [string]$AccountName, [string]$Region)
+
+        $statusData = Invoke-AWSCLI -Arguments @('config', 'describe-configuration-recorder-status') -Region $Region
+        if ($null -eq $statusData) {
+            return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-12'
+        }
+
+        $recorderActive = $false
+        $recorderNames = @()
+
+        if (Test-AuditHasProperty -Object $statusData -PropertyName 'ConfigurationRecordersStatus') {
+            foreach ($status in (Get-AuditCliArray $statusData.ConfigurationRecordersStatus)) {
+                $name = [string](Get-AuditPropertyValue $status -PropertyNames @('name'))
+                if (-not [string]::IsNullOrWhiteSpace($name)) { $recorderNames += $name }
+                if ((Test-AuditHasProperty -Object $status -PropertyName 'recording') -and ($status.recording -eq $true)) {
+                    $recorderActive = $true
+                }
+            }
+        }
+
+        $evidence = @{ recorder_active = $recorderActive; recorder_names = @($recorderNames) }
+
+        if ($recorderActive) {
+            return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-12' -Status 'PASS' -Evidence $evidence -Notes 'AWS Config recorder is active'
+        }
+
+        return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-12' -Status 'FAIL' -Evidence $evidence -Notes 'AWS Config recorder is not active'
+    }
+
+    $checks['CIC-13'] = {
+        param([string]$AccountId, [string]$AccountName, [string]$Region)
+        return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-13' -Status 'NOT_TESTED' -Evidence $null -Notes (Get-CicWorkshopNotes -ControlId 'CIC-13')
+    }
+
+    $checks['CIC-14'] = {
+        param([string]$AccountId, [string]$AccountName, [string]$Region)
+        return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-14' -Status 'NOT_TESTED' -Evidence $null -Notes (Get-CicWorkshopNotes -ControlId 'CIC-14')
+    }
+
+    $checks['CIC-15'] = {
+        param([string]$AccountId, [string]$AccountName, [string]$Region)
+        return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-15' -Status 'NOT_TESTED' -Evidence $null -Notes (Get-CicWorkshopNotes -ControlId 'CIC-15')
+    }
+
+    $checks['CIC-16'] = {
+        param([string]$AccountId, [string]$AccountName, [string]$Region)
+        return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-16' -Status 'NOT_TESTED' -Evidence $null -Notes (Get-CicWorkshopNotes -ControlId 'CIC-16')
+    }
+
+    $checks['CIC-17'] = {
+        param([string]$AccountId, [string]$AccountName, [string]$Region)
+
+        $data = Invoke-AWSCLI -Arguments @('logs', 'describe-log-groups') -Region $Region
+        if ($null -eq $data) {
+            return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-17'
+        }
+
+        $pipelineGroups = @()
+        $groupsWithoutRetention = @()
+
+        if (Test-AuditHasProperty -Object $data -PropertyName 'logGroups') {
+            foreach ($logGroup in (Get-AuditCliArray $data.logGroups)) {
+                $name = [string](Get-AuditPropertyValue $logGroup -PropertyNames @('logGroupName'))
+                $lowerName = $name.ToLower()
+                if ($lowerName -notmatch 'pipeline|codebuild|codepipeline') { continue }
+
+                $retention = $null
+                if (Test-AuditHasProperty -Object $logGroup -PropertyName 'retentionInDays') {
+                    $retention = $logGroup.retentionInDays
+                }
+
+                $pipelineGroups += @{ log_group_name = $name; retention_in_days = $retention }
+
+                if ($null -eq $retention) {
+                    if ((Get-AuditCollectionCount $groupsWithoutRetention) -lt 5) { $groupsWithoutRetention += $name }
+                }
+            }
+        }
+
+        $evidence = @{
+            pipeline_log_group_count = (Get-AuditCollectionCount $pipelineGroups)
+            pipeline_log_groups      = @($pipelineGroups)
+            groups_without_retention = @($groupsWithoutRetention)
+        }
+
+        if ((Get-AuditCollectionCount $pipelineGroups) -eq 0) {
+            return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-17' -Status 'FAIL' -Evidence $evidence -Notes 'No pipeline-related CloudWatch log groups found'
+        }
+
+        if ((Get-AuditCollectionCount $groupsWithoutRetention) -eq 0) {
+            return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-17' -Status 'PASS' -Evidence $evidence -Notes 'Pipeline log groups found with retention configured'
+        }
+
+        return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-17' -Status 'FAIL' -Evidence $evidence -Notes 'Pipeline log groups found without retention configured'
+    }
+
+    $checks['CIC-18'] = {
+        param([string]$AccountId, [string]$AccountName, [string]$Region)
+        return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-18' -Status 'NOT_TESTED' -Evidence $null -Notes (Get-CicWorkshopNotes -ControlId 'CIC-18')
+    }
+
+    $checks['CIC-19'] = {
+        param([string]$AccountId, [string]$AccountName, [string]$Region)
+
+        $endTime = (Get-Date).ToUniversalTime().ToString('o')
+        $startTime = (Get-Date).AddDays(-30).ToUniversalTime().ToString('o')
+
+        $data = Invoke-AWSCLI -Arguments @(
+            'cloudtrail', 'lookup-events',
+            '--lookup-attributes', 'AttributeKey=EventSource,AttributeValue=codepipeline.amazonaws.com',
+            '--start-time', $startTime,
+            '--end-time', $endTime,
+            '--max-results', '50'
+        ) -Region $Region
+
+        if ($null -eq $data) {
+            return New-NullApiPartialResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-19'
+        }
+
+        $eventCount = 0
+        if (Test-AuditHasProperty -Object $data -PropertyName 'Events') {
+            $eventCount = (Get-AuditCollectionCount (Get-AuditCliArray $data.Events))
+        }
+
+        $evidence = @{ pipeline_event_count_last_30_days = $eventCount }
+
+        if ($eventCount -gt 0) {
+            return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-19' -Status 'PASS' -Evidence $evidence -Notes 'CodePipeline events visible in CloudTrail'
+        }
+
+        return New-AuditResult -AccountId $AccountId -AccountName $AccountName -Region $Region -ControlId 'CIC-19' -Status 'FAIL' -Evidence $evidence -Notes 'No CodePipeline events found in CloudTrail sample'
+    }
+
+    if ($checks.Count -ne 18) {
+        throw ('Get-DomainChecks expected 18 controls (CIC-01..CIC-19, no CIC-05) but defined {0}' -f $checks.Count)
+    }
+
+    return $checks
 }

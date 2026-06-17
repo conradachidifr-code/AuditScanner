@@ -152,21 +152,9 @@ def get_domain() -> DomainModule:
 
         return _check
 
-    def cic01(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
-        stack_count = _get_cic_cloudformation_stack_count(ctx)
-        if stack_count is None:
-            return ctx.results.null_api_partial(account_id, account_name, region, "CIC-01")
-        return ctx.results.audit_result(
-            account_id,
-            account_name,
-            region,
-            "CIC-01",
-            "PARTIAL",
-            {"stack_count": stack_count},
-            "IaC-only deployment to verify during workshop. Verify no untracked console-created resources.",
-        )
-
-    checks["CIC-01"] = cic01
+    checks["CIC-01"] = workshop(
+        "CIC-01", "Verify IaC-only deployment. No untracked console-created resources."
+    )
     checks["CIC-02"] = workshop("CIC-02", "Verify IaC repos versioned via GitLab tags/releases.")
     checks["CIC-03"] = workshop("CIC-03", "Verify merge request process with peer review. Check GitLab branch protection.")
     checks["CIC-04"] = workshop("CIC-04", "Verify separate pipeline definitions for prod vs non-prod.")
@@ -219,22 +207,18 @@ def get_domain() -> DomainModule:
 
         state_buckets: list[str] = []
         for bucket_name in bucket_names:
-            if re.search(r"tfstate|terraform|iac-state|cloudformation", bucket_name.lower()):
+            if re.search(r"terraform|tfstate", bucket_name.lower()):
                 state_buckets.append(bucket_name)
 
         if collection_count(state_buckets) == 0:
-            stack_count = _get_cic_cloudformation_stack_count(ctx)
             return ctx.results.audit_result(
                 account_id,
                 account_name,
                 region,
                 "CIC-09",
                 "PARTIAL",
-                {
-                    "state_bucket_count": 0,
-                    "stack_count": stack_count,
-                },
-                "CloudFormation used (stateless) or state bucket not identified by naming",
+                {"state_bucket_count": 0},
+                "No Terraform state bucket found by naming (may use CloudFormation)",
             )
 
         bucket_evidence: list[dict[str, object]] = []
@@ -266,7 +250,7 @@ def get_domain() -> DomainModule:
                 "CIC-09",
                 "PASS",
                 evidence,
-                "IaC state bucket encrypted, private, and versioned",
+                "Terraform state bucket encrypted, private, and versioned",
             )
         return ctx.results.audit_result(
             account_id,
@@ -275,7 +259,7 @@ def get_domain() -> DomainModule:
             "CIC-09",
             "FAIL",
             evidence,
-            "IaC state bucket missing encryption, public access blocks, or versioning",
+            "Terraform state bucket missing encryption, public access blocks, or versioning",
         )
 
     checks["CIC-09"] = cic09
@@ -301,9 +285,16 @@ def get_domain() -> DomainModule:
             return ctx.results.null_api_partial(account_id, account_name, region, "CIC-10")
 
         event_count = 0
+        last_event_time = None
         if has_property(data, "Events"):
-            event_count = collection_count(property_value(data, ["Events"]))
-        evidence = {"cloudformation_event_count_last_30_days": event_count}
+            events = cli_array(property_value(data, ["Events"]))
+            event_count = collection_count(events)
+            if event_count > 0:
+                last_event_time = str(property_value(events[0], ["EventTime"]) or "")
+        evidence = {
+            "cloudformation_event_count_last_30_days": event_count,
+            "last_event_time": last_event_time,
+        }
         if event_count > 0:
             return ctx.results.audit_result(
                 account_id,
@@ -329,34 +320,20 @@ def get_domain() -> DomainModule:
 
     def cic12(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
         status_data = ctx.invoke_aws_cli(["config", "describe-configuration-recorder-status"])
-        recorder_data = ctx.invoke_aws_cli(["config", "describe-configuration-recorders"])
-        if status_data is None and recorder_data is None:
+        if status_data is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "CIC-12")
 
         recorder_active = False
         recorder_names: list[str] = []
-        if status_data and has_property(status_data, "ConfigurationRecordersStatus"):
+        if has_property(status_data, "ConfigurationRecordersStatus"):
             for status in cli_array(property_value(status_data, ["ConfigurationRecordersStatus"])):
-                if has_property(status, "name"):
-                    recorder_names.append(str(property_value(status, ["name"]) or ""))
+                name = str(property_value(status, ["name"]) or "")
+                if name:
+                    recorder_names.append(name)
                 if property_value(status, ["recording"]) is True:
                     recorder_active = True
 
-        resource_types: list[str] = []
-        if recorder_data and has_property(recorder_data, "ConfigurationRecorders"):
-            for recorder in cli_array(property_value(recorder_data, ["ConfigurationRecorders"])):
-                recording_group = property_value(recorder, ["recordingGroup"])
-                if recording_group and property_value(recording_group, ["allSupported"]) is True:
-                    resource_types.append("ALL_SUPPORTED")
-                elif recording_group and has_property(recording_group, "resourceTypes"):
-                    for resource_type in cli_array(property_value(recording_group, ["resourceTypes"])):
-                        resource_types.append(str(resource_type))
-
-        evidence = {
-            "recorder_active": recorder_active,
-            "recorder_names": list(recorder_names),
-            "resource_types": list(resource_types),
-        }
+        evidence = {"recorder_active": recorder_active, "recorder_names": recorder_names}
         if recorder_active:
             return ctx.results.audit_result(
                 account_id,
@@ -365,7 +342,7 @@ def get_domain() -> DomainModule:
                 "CIC-12",
                 "PASS",
                 evidence,
-                "AWS Config recorder is active for drift detection",
+                "AWS Config recorder is active",
             )
         return ctx.results.audit_result(
             account_id,
@@ -381,52 +358,10 @@ def get_domain() -> DomainModule:
     checks["CIC-13"] = workshop("CIC-13", "Verify GitLab repo access controls and merge rights.")
     checks["CIC-14"] = workshop("CIC-14", "Verify main/master branches protected in GitLab.")
 
-    def cic15(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
-        end_time = datetime.now(timezone.utc).isoformat()
-        start_time = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-        data = ctx.invoke_aws_cli(
-            [
-                "cloudtrail",
-                "lookup-events",
-                "--start-time",
-                start_time,
-                "--end-time",
-                end_time,
-                "--max-results",
-                "50",
-            ]
-        )
-        if data is None:
-            return ctx.results.null_api_partial(account_id, account_name, region, "CIC-15")
-
-        sampled_event_count = 0
-        console_like_events = 0
-        sample_event_names: list[str] = []
-        if has_property(data, "Events"):
-            events = cli_array(property_value(data, ["Events"]))
-            sampled_event_count = collection_count(events)
-            for event in events:
-                event_text = str(property_value(event, ["CloudTrailEvent"]) or "")
-                if re.search(r"console\.amazonaws\.com|AWS Console|Console", event_text):
-                    console_like_events += 1
-                    if collection_count(sample_event_names) < 5 and has_property(event, "EventName"):
-                        sample_event_names.append(str(property_value(event, ["EventName"]) or ""))
-
-        return ctx.results.audit_result(
-            account_id,
-            account_name,
-            region,
-            "CIC-15",
-            "PARTIAL",
-            {
-                "sampled_event_count": sampled_event_count,
-                "console_like_events": console_like_events,
-                "sample_event_names": list(sample_event_names),
-            },
-            "Manual actions allowed but tracked via CloudTrail. Verify IaC enforcement policy.",
-        )
-
-    checks["CIC-15"] = cic15
+    checks["CIC-15"] = workshop(
+        "CIC-15",
+        "Manual console changes allowed but tracked via CloudTrail. Verify IaC enforcement policy.",
+    )
     checks["CIC-16"] = workshop("CIC-16", "Verify test stage in pipeline (Checkov, KICS, cfn-lint).")
 
     def cic17(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
@@ -439,7 +374,7 @@ def get_domain() -> DomainModule:
         if has_property(data, "logGroups"):
             for log_group in cli_array(property_value(data, ["logGroups"])):
                 name = str(property_value(log_group, ["logGroupName"]) or "")
-                if not re.search(r"pipeline|codebuild|codepipeline|gitlab|ci/|/ci", name.lower()):
+                if not re.search(r"pipeline|codebuild|codepipeline", name.lower()):
                     continue
 
                 retention = None
@@ -466,9 +401,9 @@ def get_domain() -> DomainModule:
                 account_name,
                 region,
                 "CIC-17",
-                "PARTIAL",
+                "FAIL",
                 evidence,
-                "No pipeline-related log groups identified by naming",
+                "No pipeline-related CloudWatch log groups found",
             )
         if collection_count(groups_without_retention) == 0:
             return ctx.results.audit_result(
@@ -478,7 +413,7 @@ def get_domain() -> DomainModule:
                 "CIC-17",
                 "PASS",
                 evidence,
-                "Pipeline log groups have retention configured",
+                "Pipeline log groups found with retention configured",
             )
         return ctx.results.audit_result(
             account_id,
