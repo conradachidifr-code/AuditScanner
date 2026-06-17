@@ -319,7 +319,7 @@ def get_domain() -> DomainModule:
     checks["CIC-11"] = workshop("CIC-11", "Verify rollback procedure exists and has been tested.")
 
     def cic12(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
-        status_data = ctx.invoke_aws_cli(["config", "describe-configuration-recorder-status"])
+        status_data = ctx.invoke_aws_cli(["configservice", "describe-configuration-recorder-status"])
         if status_data is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "CIC-12")
 

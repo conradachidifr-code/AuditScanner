@@ -10,7 +10,12 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from audit_scanner.config import fallback_config_from_profiles, load_config
+from audit_scanner.config import (
+    fallback_config_from_profiles,
+    filter_accounts,
+    load_config,
+    parse_account_filter_tokens,
+)
 from audit_scanner.domains.registry import VALID_DOMAINS, load_domain_by_code
 from audit_scanner.output import append_session_log
 from audit_scanner.scanner import run_scan
@@ -56,12 +61,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--verbose", "-Verbose", action="store_true")
     parser.add_argument("--sequential", action="store_true", help="Disable parallel account scanning")
     parser.add_argument("--workers", type=int, default=None, help="Max parallel account workers")
+    parser.add_argument(
+        "--account",
+        action="append",
+        default=[],
+        help="Account name or 12-digit ID to scan (repeatable or comma-separated). Default: all accounts.",
+    )
     args = parser.parse_args(argv)
 
     script_root = Path(__file__).resolve().parent
     config_file = Path(args.config_file) if args.config_file else script_root / "accounts.json"
     output_path = Path(args.output_path) if args.output_path else script_root / "output"
     domain = args.domain.upper()
+
+    account_tokens = parse_account_filter_tokens(args.account)
 
     try:
         config = load_config(config_file)
@@ -72,6 +85,12 @@ def main(argv: list[str] | None = None) -> int:
         append_session_log(session_log, str(exc), "WARN")
         append_session_log(session_log, "Falling back to AWS profile discovery from ~/.aws/config", "WARN")
         config = fallback_config_from_profiles()
+
+    try:
+        config = filter_accounts(config, account_tokens)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
     region_banner = ", ".join(config.default_regions)
     all_regions = sorted({region for account in config.accounts for region in account.regions})

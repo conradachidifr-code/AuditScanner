@@ -131,6 +131,53 @@ def load_profiles_from_aws_config() -> list[dict[str, str]]:
     return profiles
 
 
+def parse_account_filter_tokens(values: list[str]) -> list[str]:
+    tokens: list[str] = []
+    for value in values:
+        for part in value.replace(";", ",").split(","):
+            token = part.strip()
+            if token:
+                tokens.append(token)
+    return tokens
+
+
+def filter_accounts(config: AppConfig, account_tokens: list[str]) -> AppConfig:
+    if not account_tokens:
+        return config
+
+    selected: list[Account] = []
+    not_found: list[str] = []
+
+    for token in account_tokens:
+        token_lower = token.lower()
+        match = next(
+            (
+                account
+                for account in config.accounts
+                if account.id == token or account.name.lower() == token_lower
+            ),
+            None,
+        )
+        if match is None:
+            not_found.append(token)
+            continue
+        if all(existing.id != match.id for existing in selected):
+            selected.append(match)
+
+    if not_found:
+        available = ", ".join(f"{account.name} ({account.id})" for account in config.accounts)
+        raise ValueError(
+            f"Unknown account(s): {', '.join(not_found)}. Configured accounts: {available}"
+        )
+
+    return AppConfig(
+        default_role_name=config.default_role_name,
+        default_regions=config.default_regions,
+        auth_mode=config.auth_mode,
+        accounts=selected,
+    )
+
+
 def fallback_config_from_profiles() -> AppConfig:
     profiles = load_profiles_from_aws_config()
     default_regions = ["eu-west-1", "eu-west-2", "eu-west-3"]

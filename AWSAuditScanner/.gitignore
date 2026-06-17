@@ -2,7 +2,6 @@
 AWSAuditScanner/output/
 anonymization-map*.json
 **/anonymization-map*.json
-AWSAuditScanner/NET.ps1_bkp.ps1
 AuditScanner*.zip
 
 # AWS / local secrets
