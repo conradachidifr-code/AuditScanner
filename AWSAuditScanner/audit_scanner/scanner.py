@@ -123,6 +123,7 @@ def scan_account(
         check_ctx = CheckContext.for_region(region, active_profile, domain.severity)
 
         for control_id, check_fn in domain.checks.items():
+            check_ctx.aws.clear_log()
 
             def on_cli_failure(diag_type: str, entry) -> None:
                 diagnostics.write_cli_failure(
@@ -239,6 +240,7 @@ def run_scan(
     active_accounts = [account for account in config.accounts if not account.skip]
     summaries: list[dict[str, Any]] = []
     all_results: dict[str, list[dict[str, Any]]] = {}
+    all_evidence: dict[str, list[dict[str, Any]]] = {}
     written_folders: list[str] = []
 
     if parallel and len(active_accounts) > 1:
@@ -277,6 +279,7 @@ def run_scan(
                     continue
                 summaries.append(result.summary)
                 all_results[result.account_name] = result.results
+                all_evidence[result.account_name] = result.evidence_records
                 if result.account_folder:
                     written_folders.append(result.account_folder)
                 append_session_log(session_log, f"Completed account {result.account_name}")
@@ -291,12 +294,13 @@ def run_scan(
             )
             summaries.append(result.summary)
             all_results[result.account_name] = result.results
+            all_evidence[result.account_name] = result.evidence_records
             if result.account_folder:
                 written_folders.append(result.account_folder)
             append_session_log(session_log, f"Completed account {result.account_name}")
 
     report_path = output_path / f"AuditReport_{domain.code}_{timestamp}.html"
-    write_html_report(report_path, domain.code, auditor, timestamp, summaries, all_results)
+    write_html_report(report_path, domain.code, auditor, timestamp, summaries, all_results, all_evidence)
 
     return {
         "timestamp": timestamp,
