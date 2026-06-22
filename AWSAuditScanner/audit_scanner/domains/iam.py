@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import csv
+import io
+import json
 import re
 import time
 import urllib.parse
@@ -23,6 +27,7 @@ SEVERITY = {
     "IAM-07": "P0",
     "IAM-08": "P0",
     "IAM-09": "P0",
+    "IAM-10": "P0",
     "IAM-11": "P0",
     "IAM-12": "P0",
     "IAM-13": "P0",
@@ -36,6 +41,7 @@ SEVERITY = {
     "IAM-21": "P0",
     "IAM-22": "P0",
     "IAM-23": "P0",
+    "IAM-24": "P0",
     "IAM-25": "P0",
     "IAM-26": "P0",
     "IAM-27": "P0",
@@ -363,26 +369,192 @@ def _iam_roles_anywhere_not_detected_result(
 
 
 def _get_iam_credential_report(ctx: CheckContext) -> dict[str, Any] | None:
+    if "report" in ctx._credential_report_cache:
+        return ctx._credential_report_cache["report"]
+
     generate_data = ctx.invoke_aws_cli(["iam", "generate-credential-report"])
     if generate_data is None:
+        result: dict[str, Any] | None = None
+    else:
+        result = None
+        for _ in range(10):
+            state = str(property_value(generate_data, ["State"]) or "")
+            if state == "COMPLETE":
+                report_data = ctx.invoke_aws_cli(["iam", "get-credential-report"])
+                generated_time = None
+                if report_data and has_property(report_data, "GeneratedTime"):
+                    generated_time = str(property_value(report_data, ["GeneratedTime"]) or "")
+                result = {"state": state, "report": report_data, "generated_time": generated_time}
+                break
+            if state == "FAILED":
+                result = {"state": state, "report": None, "generated_time": None}
+                break
+            time.sleep(2)
+            generate_data = ctx.invoke_aws_cli(["iam", "generate-credential-report"])
+            if generate_data is None:
+                result = None
+                break
+        else:
+            result = {"state": "TIMEOUT", "report": None, "generated_time": None}
+
+    ctx._credential_report_cache["report"] = result
+    return result
+
+
+_IAM_ROLE_SEPARATION_PATTERNS = {
+    "admin": re.compile(r"admin|administrator", re.IGNORECASE),
+    "security": re.compile(r"secur|audit|compliance", re.IGNORECASE),
+    "operations": re.compile(r"ops|operat|exploit|deploy", re.IGNORECASE),
+    "network": re.compile(r"network|net-|vpc|tgw", re.IGNORECASE),
+}
+
+_KMS_ADMIN_ACTION_PATTERN = re.compile(
+    r"kms:\*|kms:Create|kms:Put|kms:ScheduleKeyDeletion|kms:Disable|kms:Delete|kms:Update",
+    re.IGNORECASE,
+)
+_KMS_USE_ACTION_PATTERN = re.compile(r"kms:Encrypt|kms:Decrypt|kms:GenerateDataKey|kms:ReEncrypt", re.IGNORECASE)
+
+
+def _iam_root_credential_usage(ctx: CheckContext) -> dict[str, Any] | None:
+    credential_report = _get_iam_credential_report(ctx)
+    if not credential_report:
         return None
+    report = credential_report.get("report")
+    if not isinstance(report, dict) or not has_property(report, "Content"):
+        return None
+    try:
+        content = base64.b64decode(str(property_value(report, ["Content"]) or "")).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
+    reader = csv.DictReader(io.StringIO(content))
+    for row in reader:
+        if str(row.get("user", "")).strip() == "<root_account>":
+            return {
+                "password_last_used": row.get("password_last_used"),
+                "access_key_1_last_used_date": row.get("access_key_1_last_used_date"),
+                "access_key_2_last_used_date": row.get("access_key_2_last_used_date"),
+            }
+    return None
 
-    for _ in range(10):
-        state = str(property_value(generate_data, ["State"]) or "")
-        if state == "COMPLETE":
-            report_data = ctx.invoke_aws_cli(["iam", "get-credential-report"])
-            generated_time = None
-            if report_data and has_property(report_data, "GeneratedTime"):
-                generated_time = str(property_value(report_data, ["GeneratedTime"]) or "")
-            return {"state": state, "report": report_data, "generated_time": generated_time}
-        if state == "FAILED":
-            return {"state": state, "report": None, "generated_time": None}
-        time.sleep(2)
-        generate_data = ctx.invoke_aws_cli(["iam", "generate-credential-report"])
-        if generate_data is None:
+
+def _iam_role_separation_evidence(roles: list[dict[str, Any]]) -> dict[str, Any]:
+    buckets: dict[str, list[str]] = {name: [] for name in _IAM_ROLE_SEPARATION_PATTERNS}
+    for role in roles:
+        role_name = str(property_value(role, ["RoleName"]) or "")
+        for bucket_name, pattern in _IAM_ROLE_SEPARATION_PATTERNS.items():
+            if pattern.search(role_name) and len(buckets[bucket_name]) < 5:
+                buckets[bucket_name].append(role_name)
+    return {
+        bucket_name: {"count": len(sample_roles), "sample_roles": sample_roles}
+        for bucket_name, sample_roles in buckets.items()
+    }
+
+
+def _iam_customer_master_keys(ctx: CheckContext) -> list[dict[str, Any]] | None:
+    keys: list[dict[str, Any]] = []
+    marker: str | None = None
+    while True:
+        arguments = ["kms", "list-keys", "--limit", "1000"]
+        if marker:
+            arguments.extend(["--marker", marker])
+        list_data = ctx.invoke_aws_cli(arguments)
+        if list_data is None:
             return None
+        if has_property(list_data, "Keys"):
+            for key in cli_array(property_value(list_data, ["Keys"])):
+                key_id = str(property_value(key, ["KeyId"]) or "")
+                if not key_id:
+                    continue
+                describe_data = ctx.invoke_aws_cli(["kms", "describe-key", "--key-id", key_id])
+                metadata = property_value(describe_data, ["KeyMetadata"]) if describe_data else None
+                if isinstance(metadata, dict) and str(property_value(metadata, ["KeyManager"]) or "") == "CUSTOMER":
+                    keys.append(metadata)
+        marker = None
+        if has_property(list_data, "NextMarker"):
+            next_marker = str(property_value(list_data, ["NextMarker"]) or "").strip()
+            if next_marker and property_value(list_data, ["Truncated"]) is True:
+                marker = next_marker
+        if not marker:
+            break
+    return keys
 
-    return {"state": "TIMEOUT", "report": None, "generated_time": None}
+
+def _iam_is_ccoe_key(ctx: CheckContext, key_metadata: dict[str, Any]) -> bool:
+    key_id = str(property_value(key_metadata, ["KeyId"]) or "")
+    alias_data = ctx.invoke_aws_cli(["kms", "list-aliases", "--key-id", key_id])
+    if alias_data and has_property(alias_data, "Aliases"):
+        for alias in cli_array(property_value(alias_data, ["Aliases"])):
+            alias_name = str(property_value(alias, ["AliasName"]) or "").lower()
+            if "ccoe" in alias_name:
+                return True
+    tag_data = ctx.invoke_aws_cli(["kms", "list-resource-tags", "--key-id", key_id])
+    if tag_data and has_property(tag_data, "Tags"):
+        for tag in cli_array(property_value(tag_data, ["Tags"])):
+            tag_key = str(property_value(tag, ["TagKey"]) or "").lower()
+            tag_value = str(property_value(tag, ["TagValue"]) or "").lower()
+            if "ccoe" in tag_key or "ccoe" in tag_value:
+                return True
+    return False
+
+
+def _iam_policy_principal_actions(policy_text: str) -> dict[str, set[str]]:
+    principal_actions: dict[str, set[str]] = {}
+    try:
+        policy = json.loads(policy_text)
+    except json.JSONDecodeError:
+        return principal_actions
+    statements = policy.get("Statement", [])
+    if isinstance(statements, dict):
+        statements = [statements]
+    for statement in statements:
+        if not isinstance(statement, dict):
+            continue
+        if str(statement.get("Effect", "")).upper() != "Allow":
+            continue
+        actions = statement.get("Action", [])
+        if isinstance(actions, str):
+            actions = [actions]
+        principals = statement.get("Principal", {})
+        principal_ids: list[str] = []
+        if isinstance(principals, str):
+            principal_ids = [principals]
+        elif isinstance(principals, dict):
+            for value in principals.values():
+                if isinstance(value, str):
+                    principal_ids.append(value)
+                elif isinstance(value, list):
+                    principal_ids.extend(str(item) for item in value)
+        for principal in principal_ids:
+            principal_actions.setdefault(principal, set()).update(str(action) for action in actions)
+    return principal_actions
+
+
+def _iam_kms_dual_access_evidence(ctx: CheckContext) -> dict[str, Any] | None:
+    customer_keys = _iam_customer_master_keys(ctx)
+    if customer_keys is None:
+        return None
+    ccoe_keys = [key for key in customer_keys if _iam_is_ccoe_key(ctx, key)]
+    dual_access_keys: list[dict[str, Any]] = []
+    checked_keys: list[str] = []
+    for key_metadata in ccoe_keys:
+        key_id = str(property_value(key_metadata, ["KeyId"]) or "")
+        checked_keys.append(key_id)
+        policy_data = ctx.invoke_aws_cli(["kms", "get-key-policy", "--key-id", key_id, "--policy-name", "default"])
+        policy_text = str(property_value(policy_data, ["Policy"]) or "")
+        if not policy_text:
+            continue
+        principal_actions = _iam_policy_principal_actions(policy_text)
+        for principal, actions in principal_actions.items():
+            action_text = " ".join(sorted(actions))
+            has_admin = bool(_KMS_ADMIN_ACTION_PATTERN.search(action_text))
+            has_use = bool(_KMS_USE_ACTION_PATTERN.search(action_text))
+            if has_admin and has_use:
+                dual_access_keys.append({"key_id": key_id, "principal": principal})
+    return {
+        "ccoe_key_count": collection_count(ccoe_keys),
+        "checked_key_ids": checked_keys[:10],
+        "dual_access_entries": dual_access_keys[:10],
+    }
 
 
 def get_domain() -> DomainModule:
@@ -405,14 +577,46 @@ def get_domain() -> DomainModule:
         if has_property(summary, "AccountMFAEnabled"):
             value = property_value(summary, ["AccountMFAEnabled"])
             mfa_enabled = int(value) if value is not None else None
+        root_usage = _iam_root_credential_usage(ctx)
+        evidence: dict[str, Any] = {"AccountMFAEnabled": mfa_enabled}
+        if root_usage:
+            evidence["root_credential_usage"] = root_usage
+            recent_use_values = [
+                str(root_usage.get("password_last_used") or ""),
+                str(root_usage.get("access_key_1_last_used_date") or ""),
+                str(root_usage.get("access_key_2_last_used_date") or ""),
+            ]
+            operational_use = any(
+                value not in ("", "N/A", "no_information", "not_supported")
+                for value in recent_use_values
+            )
+            if operational_use:
+                return ctx.results.audit_result(
+                    account_id,
+                    account_name,
+                    region,
+                    "IAM-01",
+                    "FAIL",
+                    evidence,
+                    "Root account shows recent operational usage in credential report",
+                )
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "IAM-01",
+                "PASS",
+                evidence,
+                "Root credential report shows no recent operational usage",
+            )
         return ctx.results.audit_result(
             account_id,
             account_name,
             region,
             "IAM-01",
             "PARTIAL",
-            {"AccountMFAEnabled": mfa_enabled},
-            "Root last-used date requires credential report. Verify via console or credential report.",
+            evidence,
+            "Root MFA status collected; credential report unavailable for last-used dates",
         )
 
     checks["IAM-01"] = iam01
@@ -474,9 +678,9 @@ def get_domain() -> DomainModule:
         users = _iam_all_users(ctx)
         if users is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "IAM-05")
+        instances = _iam_sso_instances(ctx)
         console_user_count = 0
         console_usernames: list[str] = []
-        unclear_count = 0
         for user in users:
             user_name = str(property_value(user, ["UserName"]) or "")
             has_console = _iam_user_has_console_access(ctx, user_name)
@@ -488,7 +692,7 @@ def get_domain() -> DomainModule:
             "iam_user_count": collection_count(users),
             "console_user_count": console_user_count,
             "console_usernames": list(console_usernames),
-            "unclear_status_count": unclear_count,
+            "identity_center_instance_count": collection_count(instances or []),
         }
         if console_user_count > 0:
             return ctx.results.audit_result(
@@ -498,9 +702,9 @@ def get_domain() -> DomainModule:
                 "IAM-05",
                 "FAIL",
                 evidence,
-                "Local IAM users with console access exist",
+                "Local IAM users with console access found; human access should be federated",
             )
-        if collection_count(users) > 0 and unclear_count > 0:
+        if collection_count(instances or []) == 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -508,7 +712,7 @@ def get_domain() -> DomainModule:
                 "IAM-05",
                 "PARTIAL",
                 evidence,
-                "Users exist but console access status unclear",
+                "No Identity Center instance detected to confirm central IdP federation",
             )
         return ctx.results.audit_result(
             account_id,
@@ -517,7 +721,7 @@ def get_domain() -> DomainModule:
             "IAM-05",
             "PASS",
             evidence,
-            "No local IAM users with console access detected",
+            "Identity Center is present and no local console IAM users were found",
         )
 
     checks["IAM-05"] = iam05
@@ -593,6 +797,15 @@ def get_domain() -> DomainModule:
         duration_buckets: dict[str, int] = {}
         long_duration_sets: list[str] = []
         permission_set_count = 0
+        long_session_roles: list[str] = []
+        roles = _iam_all_roles(ctx)
+        if roles:
+            for role in roles:
+                max_session = int(property_value(role, ["MaxSessionDuration"]) or 3600)
+                if max_session > 3600:
+                    role_name = str(property_value(role, ["RoleName"]) or "")
+                    if collection_count(long_session_roles) < 10:
+                        long_session_roles.append(role_name)
         for instance in instances:
             instance_arn = str(property_value(instance, ["InstanceArn"]) or "")
             if not instance_arn.strip():
@@ -612,8 +825,10 @@ def get_domain() -> DomainModule:
             "permission_set_count": permission_set_count,
             "duration_buckets": duration_buckets,
             "long_duration_names": list(long_duration_sets),
+            "roles_over_1h_session_count": collection_count(long_session_roles),
+            "roles_over_1h_session_names": list(long_session_roles),
         }
-        if collection_count(long_duration_sets) > 0:
+        if collection_count(long_duration_sets) > 0 or collection_count(long_session_roles) > 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -621,7 +836,7 @@ def get_domain() -> DomainModule:
                 "IAM-07",
                 "FAIL",
                 evidence,
-                "One or more permission sets exceed PT8H session duration",
+                "One or more permission sets or IAM roles exceed allowed session duration",
             )
         if permission_set_count == 0:
             return ctx.results.audit_result(
@@ -640,7 +855,7 @@ def get_domain() -> DomainModule:
             "IAM-07",
             "PASS",
             evidence,
-            "All permission sets are at most PT8H",
+            "All permission sets are at most PT8H and no IAM roles exceed 1 hour MaxSessionDuration",
         )
 
     checks["IAM-07"] = iam07
@@ -741,6 +956,38 @@ def get_domain() -> DomainModule:
         )
 
     checks["IAM-09"] = iam09
+
+    def iam10(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
+        gate = _iam_global_control_gate(account_id, account_name, region, "IAM-10", ctx)
+        if gate:
+            return gate
+        roles = _iam_all_roles(ctx)
+        if roles is None:
+            return ctx.results.null_api_partial(account_id, account_name, region, "IAM-10")
+        separation = _iam_role_separation_evidence(roles)
+        populated_buckets = [name for name, data in separation.items() if data["count"] > 0]
+        evidence = {"role_count": collection_count(roles), "role_buckets": separation}
+        if len(populated_buckets) >= 3:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "IAM-10",
+                "PARTIAL",
+                evidence,
+                "Role naming suggests separation across admin, security, operations and network functions; verify against naming convention",
+            )
+        return ctx.results.audit_result(
+            account_id,
+            account_name,
+            region,
+            "IAM-10",
+            "PARTIAL",
+            evidence,
+            "Dedicated admin, security, operations and network roles not clearly identified by naming convention",
+        )
+
+    checks["IAM-10"] = iam10
 
     def iam11(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
         gate = _iam_global_control_gate(account_id, account_name, region, "IAM-11", ctx)
@@ -1179,6 +1426,46 @@ def get_domain() -> DomainModule:
         "IAM-23",
         "Verify time-boxed elevation exists for break-glass access. Check CCOScriptAdmin RFC process.",
     )
+
+    def iam24(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
+        gate = _iam_global_control_gate(account_id, account_name, region, "IAM-24", ctx)
+        if gate:
+            return gate
+        kms_evidence = _iam_kms_dual_access_evidence(ctx)
+        if kms_evidence is None:
+            return ctx.results.null_api_partial(account_id, account_name, region, "IAM-24")
+        evidence = kms_evidence
+        if evidence["ccoe_key_count"] == 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "IAM-24",
+                "PARTIAL",
+                evidence,
+                "No CCOE-tagged customer-managed KMS keys found to assess key-admin vs key-user separation",
+            )
+        if collection_count(evidence["dual_access_entries"]) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "IAM-24",
+                "FAIL",
+                evidence,
+                "One or more CCOE KMS key policies grant both administrative and usage actions to the same principal",
+            )
+        return ctx.results.audit_result(
+            account_id,
+            account_name,
+            region,
+            "IAM-24",
+            "PASS",
+            evidence,
+            "CCOE KMS key policies do not combine key-admin and key-user privileges on the same principal",
+        )
+
+    checks["IAM-24"] = iam24
 
     def iam25(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
         gate = _iam_global_control_gate(account_id, account_name, region, "IAM-25", ctx)
@@ -2061,10 +2348,36 @@ def get_domain() -> DomainModule:
         event_count = 0
         if has_property(data, "Events"):
             event_count = collection_count(property_value(data, ["Events"]))
-        evidence = {"sso_event_count_last_7_days": event_count}
+        trail_data = ctx.invoke_aws_cli(["cloudtrail", "describe-trails"])
+        multi_region_trails: list[str] = []
+        if trail_data and has_property(trail_data, "trailList"):
+            for trail in cli_array(property_value(trail_data, ["trailList"])):
+                if property_value(trail, ["IsMultiRegionTrail"]) is True:
+                    multi_region_trails.append(str(property_value(trail, ["Name"]) or ""))
+        evidence = {
+            "sso_event_count_last_7_days": event_count,
+            "multi_region_trail_count": collection_count(multi_region_trails),
+            "multi_region_trail_names": multi_region_trails[:10],
+        }
+        if event_count > 0 and collection_count(multi_region_trails) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "IAM-54",
+                "PASS",
+                evidence,
+                "SSO events visible in CloudTrail and at least one multi-region trail is configured",
+            )
         if event_count > 0:
             return ctx.results.audit_result(
-                account_id, account_name, region, "IAM-54", "PASS", evidence, "SSO events visible in CloudTrail"
+                account_id,
+                account_name,
+                region,
+                "IAM-54",
+                "PARTIAL",
+                evidence,
+                "SSO events are visible but no multi-region CloudTrail trail was detected",
             )
         return ctx.results.audit_result(
             account_id, account_name, region, "IAM-54", "FAIL", evidence, "No SSO events in CloudTrail"
@@ -2080,6 +2393,7 @@ def get_domain() -> DomainModule:
         if rules_data is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "IAM-55")
         sso_rules: list[str] = []
+        rules_with_targets: list[str] = []
         if has_property(rules_data, "Rules"):
             for rule in cli_array(property_value(rules_data, ["Rules"])):
                 if not isinstance(rule, dict):
@@ -2091,8 +2405,15 @@ def get_domain() -> DomainModule:
                     or re.search(r"SSO|IdentityCenter|IAM", rule_name)
                 ):
                     sso_rules.append(rule_name)
-        evidence = {"sso_rule_names": list(sso_rules)}
-        if collection_count(sso_rules) > 0:
+                    targets_data = ctx.invoke_aws_cli(["events", "list-targets-by-rule", "--rule", rule_name])
+                    if targets_data and has_property(targets_data, "Targets"):
+                        if collection_count(property_value(targets_data, ["Targets"])) > 0:
+                            rules_with_targets.append(rule_name)
+        evidence = {
+            "sso_rule_names": list(sso_rules),
+            "rules_with_active_targets": list(rules_with_targets),
+        }
+        if collection_count(rules_with_targets) > 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -2100,7 +2421,17 @@ def get_domain() -> DomainModule:
                 "IAM-55",
                 "PASS",
                 evidence,
-                "EventBridge rules exist on critical IAM or SSO events",
+                "EventBridge rules on critical IAM or SSO events have active targets",
+            )
+        if collection_count(sso_rules) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "IAM-55",
+                "PARTIAL",
+                evidence,
+                "SSO or IAM EventBridge rules exist but no active targets were detected",
             )
         return ctx.results.audit_result(
             account_id,
@@ -2113,5 +2444,8 @@ def get_domain() -> DomainModule:
         )
 
     checks["IAM-55"] = iam55
+
+    if len(checks) != 55:
+        raise RuntimeError(f"get_domain expected 55 IAM controls but defined {len(checks)}")
 
     return DomainModule(code="IAM", severity=SEVERITY, checks=checks)  # type: ignore[arg-type]

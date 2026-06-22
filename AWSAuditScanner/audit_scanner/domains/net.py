@@ -28,6 +28,7 @@ SEVERITY = {
     "NET-15": "P0",
     "NET-16": "P2",
     "NET-17": "P0",
+    "NET-18": "P0",
     "NET-19": "P0",
     "NET-20": "P0",
     "NET-21": "P0",
@@ -193,6 +194,108 @@ def _test_net_environment_name(name: str, environment_type: str) -> bool:
     if re.search("nonprod|non-prod|dev|test|uat|sandbox|preprod", lower_name):
         return True
     return False
+
+
+def _get_net_igw_route_evidence(ctx: CheckContext) -> dict[str, Any] | None:
+    route_tables = _get_net_route_tables(ctx)
+    subnet_map = _get_net_subnet_route_table_map(ctx)
+    if route_tables is None or subnet_map is None:
+        return None
+
+    igw_route_tables: list[str] = []
+    private_subnet_igw_issues: list[dict[str, str]] = []
+    public_subnet_igw_routes: list[str] = []
+
+    for route_table in route_tables:
+        if not _test_net_route_table_has_igw_route(route_table):
+            continue
+        route_table_id = str(route_table.get("RouteTableId", "") or "")
+        igw_route_tables.append(route_table_id)
+        if not _test_net_has_property(route_table, "Associations"):
+            continue
+        for association in _get_net_cli_array(route_table.get("Associations")):
+            subnet_id = str(association.get("SubnetId", "") or "")
+            if not subnet_id or subnet_id not in subnet_map:
+                continue
+            if subnet_map[subnet_id].get("is_public"):
+                public_subnet_igw_routes.append(subnet_id)
+            elif _get_net_collection_count(private_subnet_igw_issues) < 10:
+                private_subnet_igw_issues.append(
+                    {"subnet_id": subnet_id, "route_table_id": route_table_id}
+                )
+
+    return {
+        "igw_route_table_count": _get_net_collection_count(igw_route_tables),
+        "public_subnet_igw_route_count": _get_net_collection_count(public_subnet_igw_routes),
+        "private_subnet_igw_issues": list(private_subnet_igw_issues),
+    }
+
+
+def _evaluate_net_exposed_api(ctx: CheckContext, api_id: str, api_name: str) -> dict[str, Any]:
+    resource_data = ctx.invoke_aws_cli(["apigateway", "get-resources", "--rest-api-id", api_id])
+    stages_data = ctx.invoke_aws_cli(["apigateway", "get-stages", "--rest-api-id", api_id])
+
+    unauthenticated_methods = 0
+    method_count = 0
+    if resource_data and _test_net_has_property(resource_data, "items"):
+        for resource in _get_net_cli_array(resource_data.get("items")):
+            if not _test_net_has_property(resource, "resourceMethods"):
+                continue
+            resource_methods = resource.get("resourceMethods")
+            if not isinstance(resource_methods, dict):
+                continue
+            resource_id = str(resource.get("id", "") or "")
+            for method_name in resource_methods.keys():
+                method_count += 1
+                method_data = ctx.invoke_aws_cli(
+                    [
+                        "apigateway",
+                        "get-method",
+                        "--rest-api-id",
+                        api_id,
+                        "--resource-id",
+                        resource_id,
+                        "--http-method",
+                        str(method_name),
+                    ]
+                )
+                authorization_type = str(_get_net_property_value(method_data, ["authorizationType"]) or "")
+                if authorization_type.lower() == "none":
+                    unauthenticated_methods += 1
+
+    throttled_stages = 0
+    logged_stages = 0
+    waf_protected_stages = 0
+    stage_count = 0
+    if stages_data and _test_net_has_property(stages_data, "item"):
+        for stage in _get_net_cli_array(stages_data.get("item")):
+            stage_count += 1
+            stage_name = str(stage.get("stageName", "") or "")
+            route_settings = stage.get("defaultRouteSettings")
+            if isinstance(route_settings, dict):
+                burst = route_settings.get("throttlingBurstLimit")
+                rate = route_settings.get("throttlingRateLimit")
+                if burst is not None and rate is not None:
+                    throttled_stages += 1
+            access_log_settings = stage.get("accessLogSettings")
+            if isinstance(access_log_settings, dict) and access_log_settings.get("destinationArn"):
+                logged_stages += 1
+            if stage_name:
+                stage_arn = f"arn:aws:apigateway:{ctx.aws.region}::/restapis/{api_id}/stages/{stage_name}"
+                waf_data = ctx.invoke_aws_cli(["wafv2", "get-web-acl-for-resource", "--resource-arn", stage_arn])
+                if waf_data is not None and _test_net_has_property(waf_data, "WebACL"):
+                    waf_protected_stages += 1
+
+    return {
+        "api_id": api_id,
+        "api_name": api_name,
+        "method_count": method_count,
+        "unauthenticated_method_count": unauthenticated_methods,
+        "stage_count": stage_count,
+        "throttled_stage_count": throttled_stages,
+        "logged_stage_count": logged_stages,
+        "waf_protected_stage_count": waf_protected_stages,
+    }
 
 
 def get_domain() -> DomainModule:
@@ -385,43 +488,39 @@ def get_domain() -> DomainModule:
     checks["NET-04"] = net04
 
     def net05(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
-        data = ctx.invoke_aws_cli(["ec2", "describe-internet-gateways"])
-        if data is None:
+        igw_evidence = _get_net_igw_route_evidence(ctx)
+        if igw_evidence is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "NET-05")
 
-        igws: list[dict[str, Any]] = []
-        if _test_net_has_property(data, "InternetGateways"):
-            igws = _get_net_cli_array(data.get("InternetGateways"))
-
-        attached_vpc_ids = _new_net_list()
-        for igw in igws:
-            if not _test_net_has_property(igw, "Attachments"):
-                continue
-            for attachment in _get_net_cli_array(igw.get("Attachments")):
-                if _test_net_has_property(attachment, "VpcId"):
-                    attached_vpc_ids.append(str(attachment.get("VpcId", "") or ""))
-
-        igw_count = _get_net_collection_count(igws)
-        evidence = {"igw_count": igw_count, "attached_vpc_ids": list(attached_vpc_ids)}
-
-        if igw_count <= _get_net_collection_count(attached_vpc_ids):
+        evidence = igw_evidence
+        if evidence["igw_route_table_count"] == 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
                 region,
                 "NET-05",
-                "PASS",
+                "PARTIAL",
                 evidence,
-                "Internet Gateway usage appears limited to attached VPCs",
+                "No Internet Gateway routes detected in route tables",
+            )
+        if _get_net_collection_count(evidence["private_subnet_igw_issues"]) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "NET-05",
+                "FAIL",
+                evidence,
+                "One or more private subnets route to an Internet Gateway",
             )
         return ctx.results.audit_result(
             account_id,
             account_name,
             region,
             "NET-05",
-            "PARTIAL",
+            "PASS",
             evidence,
-            "Review Internet Gateway attachments for unnecessary exposure",
+            "Internet Gateway routes are limited to public subnets",
         )
 
     checks["NET-05"] = net05
@@ -517,24 +616,14 @@ def get_domain() -> DomainModule:
                 evidence,
                 "Network Firewall deployed for egress filtering",
             )
-        if unrestricted_egress_count == 0:
-            return ctx.results.audit_result(
-                account_id,
-                account_name,
-                region,
-                "NET-07",
-                "PASS",
-                evidence,
-                "Security groups do not allow unrestricted egress",
-            )
         return ctx.results.audit_result(
             account_id,
             account_name,
             region,
             "NET-07",
-            "FAIL",
+            "PARTIAL",
             evidence,
-            "No Network Firewall and unrestricted egress security groups found",
+            "No Network Firewall detected; verify controlled egress path via proxy, TGW or firewall",
         )
 
     checks["NET-07"] = net07
@@ -799,7 +888,7 @@ def get_domain() -> DomainModule:
         if data is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "NET-14")
 
-        required_services = [".s3", ".ssm", ".secretsmanager", ".kms"]
+        required_services = [".s3", ".ssm", ".secretsmanager", ".kms", ".dynamodb", ".logs", ".monitoring"]
         found_services = _new_net_list()
         service_names = _new_net_list()
         required_missing = _new_net_list()
@@ -991,6 +1080,96 @@ def get_domain() -> DomainModule:
 
     checks["NET-17"] = net17
 
+    def net18(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
+        rest_data = ctx.invoke_aws_cli(["apigateway", "get-rest-apis"])
+        http_data = ctx.invoke_aws_cli(["apigatewayv2", "get-apis"])
+        if rest_data is None and http_data is None:
+            return ctx.results.null_api_partial(account_id, account_name, region, "NET-18")
+
+        apis: list[dict[str, Any]] = []
+        if rest_data and _test_net_has_property(rest_data, "items"):
+            for api in _get_net_cli_array(rest_data.get("items")):
+                api_id = str(api.get("id", "") or "")
+                api_name = str(api.get("name", "") or "")
+                endpoint_types = _get_net_cli_array(api.get("endpointConfiguration", {}).get("types", []))
+                if "PRIVATE" in [str(item) for item in endpoint_types]:
+                    continue
+                if api_id:
+                    apis.append(_evaluate_net_exposed_api(ctx, api_id, api_name))
+
+        http_api_summaries: list[dict[str, Any]] = []
+        if http_data and _test_net_has_property(http_data, "Items"):
+            for api in _get_net_cli_array(http_data.get("Items")):
+                http_api_summaries.append(
+                    {
+                        "api_id": str(api.get("ApiId", "") or ""),
+                        "name": str(api.get("Name", "") or ""),
+                        "protocol": str(api.get("ProtocolType", "") or ""),
+                    }
+                )
+
+        if _get_net_collection_count(apis) == 0 and _get_net_collection_count(http_api_summaries) == 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "NET-18",
+                "PARTIAL",
+                {"rest_api_count": 0, "http_api_count": 0},
+                "No public REST or HTTP APIs found in region",
+            )
+
+        failing_apis: list[dict[str, Any]] = []
+        passing_apis: list[dict[str, Any]] = []
+        for api in apis:
+            unauth = int(api.get("unauthenticated_method_count", 0) or 0)
+            throttled = int(api.get("throttled_stage_count", 0) or 0)
+            logged = int(api.get("logged_stage_count", 0) or 0)
+            waf_stages = int(api.get("waf_protected_stage_count", 0) or 0)
+            if unauth > 0 or throttled == 0 or logged == 0 or waf_stages == 0:
+                failing_apis.append(api)
+            else:
+                passing_apis.append(api)
+
+        evidence = {
+            "rest_api_count": _get_net_collection_count(apis),
+            "http_api_count": _get_net_collection_count(http_api_summaries),
+            "passing_rest_apis": list(passing_apis),
+            "failing_rest_apis": list(failing_apis),
+            "http_apis": list(http_api_summaries),
+        }
+        if _get_net_collection_count(failing_apis) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "NET-18",
+                "FAIL",
+                evidence,
+                "One or more exposed APIs lack authentication, throttling, logging or WAF protection",
+            )
+        if _get_net_collection_count(http_api_summaries) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "NET-18",
+                "PARTIAL",
+                evidence,
+                "REST APIs are protected; review HTTP APIs (v2) separately",
+            )
+        return ctx.results.audit_result(
+            account_id,
+            account_name,
+            region,
+            "NET-18",
+            "PASS",
+            evidence,
+            "Exposed REST APIs have authentication, throttling, logging and WAF protection",
+        )
+
+    checks["NET-18"] = net18
+
     def net19(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
         data = _invoke_aws_cli_in_region(ctx, ["shield", "describe-subscription"], "us-east-1")
         if data is None:
@@ -1123,23 +1302,47 @@ def get_domain() -> DomainModule:
 
         network_patterns = (
             r"ec2\.amazonaws\.com|CreateRoute|DeleteRoute|AuthorizeSecurityGroup|RevokeSecurityGroup|CreateVpc|"
-            r"DeleteVpc|ModifyVpc|CreateSubnet|DeleteSubnet"
+            r"DeleteVpc|ModifyVpc|CreateSubnet|DeleteSubnet|TransitGateway|VpcEndpoint|CreateInternetGateway"
         )
         matching_rules = _new_net_list()
+        rules_with_targets = _new_net_list()
         if _test_net_has_property(data, "Rules"):
             for rule in _get_net_cli_array(data.get("Rules")):
                 rule_name = str(_get_net_property_value(rule, ["Name", "name"]) or "")
                 event_pattern = str(_get_net_property_value(rule, ["EventPattern", "eventPattern"]) or "")
                 if (
                     (event_pattern.strip() and re.search(network_patterns, event_pattern, re.IGNORECASE))
-                    or re.search("Network|VPC|SecurityGroup|Route", rule_name, re.IGNORECASE)
+                    or re.search("Network|VPC|SecurityGroup|Route|TGW|TransitGateway", rule_name, re.IGNORECASE)
                 ):
                     matching_rules.append(rule_name)
+                    targets_data = ctx.invoke_aws_cli(["events", "list-targets-by-rule", "--rule", rule_name])
+                    if targets_data and _test_net_has_property(targets_data, "Targets"):
+                        if _get_net_collection_count(targets_data.get("Targets")) > 0:
+                            rules_with_targets.append(rule_name)
 
-        evidence = {"matching_rule_names": list(matching_rules)}
+        evidence = {
+            "matching_rule_names": list(matching_rules),
+            "rules_with_active_targets": list(rules_with_targets),
+        }
+        if _get_net_collection_count(rules_with_targets) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "NET-23",
+                "PASS",
+                evidence,
+                "EventBridge rules on network changes have active targets",
+            )
         if _get_net_collection_count(matching_rules) > 0:
             return ctx.results.audit_result(
-                account_id, account_name, region, "NET-23", "PASS", evidence, "EventBridge rules on network changes found"
+                account_id,
+                account_name,
+                region,
+                "NET-23",
+                "PARTIAL",
+                evidence,
+                "Network EventBridge rules exist but no active targets were detected",
             )
         return ctx.results.audit_result(
             account_id, account_name, region, "NET-23", "FAIL", evidence, "No network alerting rules found"
@@ -1233,7 +1436,8 @@ def get_domain() -> DomainModule:
 
     def net27(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
         data = ctx.invoke_aws_cli(["ec2", "describe-flow-logs"])
-        if data is None:
+        vpcs = _get_net_vpcs(ctx)
+        if data is None or vpcs is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "NET-27")
 
         flow_logs = _new_net_list()
@@ -1250,23 +1454,40 @@ def get_domain() -> DomainModule:
                     "id": str(flow_log.get("FlowLogId", "") or ""),
                     "status": str(flow_log.get("FlowLogStatus", "") or ""),
                     "destination": destination,
+                    "resource_id": str(flow_log.get("ResourceId", "") or ""),
                 }
                 flow_logs.append(flow_log_record)
+
+        vpc_coverage: list[dict[str, Any]] = []
+        vpcs_without_flow_logs = 0
+        for vpc in vpcs:
+            vpc_id = str(vpc.get("VpcId", "") or "")
+            active_for_vpc = 0
+            for flow_log in flow_logs:
+                resource_id = str(flow_log.get("resource_id", "") or "")
+                if resource_id == vpc_id and flow_log.get("status") == "ACTIVE":
+                    active_for_vpc += 1
+            vpc_coverage.append({"vpc_id": vpc_id, "active_flow_log_count": active_for_vpc})
+            if active_for_vpc == 0:
+                vpcs_without_flow_logs += 1
 
         valid_destinations = 0
         for flow_log in flow_logs:
             if flow_log.get("status") != "ACTIVE":
                 continue
-            if flow_log.get("destination") == "s3" or flow_log.get("destination") == "cloud-watch-logs":
+            if flow_log.get("destination") in ("s3", "cloud-watch-logs"):
                 valid_destinations += 1
 
         evidence = {
             "flow_log_count": _get_net_collection_count(flow_logs),
             "active_flow_log_count": active_count,
             "valid_destination_count": valid_destinations,
+            "vpc_count": _get_net_collection_count(vpcs),
+            "vpcs_without_flow_logs": vpcs_without_flow_logs,
+            "vpc_coverage": list(vpc_coverage),
             "flow_logs": list(flow_logs),
         }
-        if valid_destinations > 0:
+        if valid_destinations > 0 and vpcs_without_flow_logs == 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -1274,7 +1495,17 @@ def get_domain() -> DomainModule:
                 "NET-27",
                 "PASS",
                 evidence,
-                "Active flow logs export to S3 or CloudWatch Logs",
+                "All VPCs have active flow logs exporting to S3 or CloudWatch Logs",
+            )
+        if valid_destinations > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "NET-27",
+                "PARTIAL",
+                evidence,
+                "Flow logs exist but not all VPCs have active flow log coverage",
             )
         return ctx.results.audit_result(
             account_id,
@@ -1287,5 +1518,8 @@ def get_domain() -> DomainModule:
         )
 
     checks["NET-27"] = net27
+
+    if len(checks) != 27:
+        raise RuntimeError(f"get_domain expected 27 NET controls but defined {len(checks)}")
 
     return DomainModule(code="NET", severity=SEVERITY, checks=checks)  # type: ignore[arg-type]

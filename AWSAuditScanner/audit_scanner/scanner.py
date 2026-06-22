@@ -120,8 +120,9 @@ def scan_account(
         if verbose:
             print(f"  Region: {region}")
 
+        check_ctx = CheckContext.for_region(region, active_profile, domain.severity)
+
         for control_id, check_fn in domain.checks.items():
-            check_ctx = CheckContext.for_region(region, active_profile, domain.severity)
 
             def on_cli_failure(diag_type: str, entry) -> None:
                 diagnostics.write_cli_failure(

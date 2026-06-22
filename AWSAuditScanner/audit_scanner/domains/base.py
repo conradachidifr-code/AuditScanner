@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from audit_scanner.aws_cli import AwsCliContext
@@ -18,6 +18,7 @@ class CheckContext:
     aws: AwsCliContext
     results: ResultFactory
     invoke_aws_cli: Callable[[list[str]], Any | None]
+    _credential_report_cache: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @classmethod
     def for_region(cls, region: str, profile: str | None, severity: dict[str, str]) -> "CheckContext":

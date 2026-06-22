@@ -123,17 +123,21 @@ def main(argv: list[str] | None = None) -> int:
 
     skip_controls = {item.strip() for item in args.skip_controls.split(",") if item.strip()}
     started = datetime.now()
-    outcome = run_scan(
-        config=config,
-        domain=domain_module,
-        output_path=output_path,
-        auditor=args.auditor,
-        auth_mode=config.auth_mode,
-        skip_controls=skip_controls,
-        parallel=not args.sequential,
-        max_workers=args.workers,
-        verbose=args.verbose,
-    )
+    try:
+        outcome = run_scan(
+            config=config,
+            domain=domain_module,
+            output_path=output_path,
+            auditor=args.auditor,
+            auth_mode=config.auth_mode,
+            skip_controls=skip_controls,
+            parallel=not args.sequential,
+            max_workers=args.workers,
+            verbose=args.verbose,
+        )
+    except KeyboardInterrupt:
+        print("\nScan interrupted. Use --sequential for a cleaner stop on Windows.", file=sys.stderr)
+        return 130
 
     _print_summary(outcome["summaries"])
     elapsed = datetime.now() - started

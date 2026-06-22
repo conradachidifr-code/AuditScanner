@@ -4,6 +4,13 @@ anonymization-map*.json
 **/anonymization-map*.json
 AuditScanner*.zip
 
+# Local reference documents (coverage analyses, error logs)
+*.pdf
+**/*.pdf
+
+# macOS
+.DS_Store
+
 # AWS / local secrets
 .env
 *.pem
