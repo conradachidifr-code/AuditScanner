@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections import OrderedDict
 from typing import Any
@@ -86,6 +87,60 @@ def _test_dat_bucket_name_critical(bucket_name: str) -> bool:
 
 def _test_dat_bucket_name_log_or_backup(bucket_name: str) -> bool:
     return re.search(r"log|backup", bucket_name.lower()) is not None
+
+
+def _test_dat_bucket_policy_enforces_tls(policy_text: str) -> bool:
+    try:
+        policy = json.loads(policy_text)
+    except json.JSONDecodeError:
+        return False
+    statements = policy.get("Statement", [])
+    if isinstance(statements, dict):
+        statements = [statements]
+    for statement in statements:
+        if not isinstance(statement, dict):
+            continue
+        if str(statement.get("Effect", "")).upper() != "Deny":
+            continue
+        actions = statement.get("Action", [])
+        if isinstance(actions, str):
+            actions = [actions]
+        if not any(action == "*" or str(action).startswith("s3:") for action in actions):
+            continue
+        condition = statement.get("Condition")
+        if not isinstance(condition, dict):
+            continue
+        bool_condition = condition.get("Bool")
+        if not isinstance(bool_condition, dict):
+            continue
+        if str(bool_condition.get("aws:SecureTransport", "")).lower() == "false":
+            return True
+    return False
+
+
+def _test_dat_backup_policy_denies_delete_recovery(policy_text: str) -> bool:
+    try:
+        policy = json.loads(policy_text)
+    except json.JSONDecodeError:
+        return False
+    statements = policy.get("Statement", [])
+    if isinstance(statements, dict):
+        statements = [statements]
+    for statement in statements:
+        if not isinstance(statement, dict):
+            continue
+        if str(statement.get("Effect", "")).upper() != "Deny":
+            continue
+        actions = statement.get("Action", [])
+        if isinstance(actions, str):
+            actions = [actions]
+        for action in actions:
+            action_text = str(action)
+            if action_text in {"backup:DeleteRecoveryPoint", "backup:*", "*"}:
+                return True
+            if "DeleteRecoveryPoint" in action_text:
+                return True
+    return False
 
 
 def _test_dat_s3_bucket_public(ctx: CheckContext, region: str, bucket_name: str) -> bool:
@@ -742,6 +797,7 @@ def get_domain() -> DomainModule:
         buckets_with_policy = 0
         buckets_without_policy = 0
         public_policy_buckets: list[str] = []
+        buckets_without_tls_deny: list[str] = []
         for bucket_name in bucket_names:
             policy_data = _invoke_aws_cli_in_region(
                 ctx, ["s3api", "get-bucket-policy", "--bucket", bucket_name], region
@@ -759,12 +815,16 @@ def get_domain() -> DomainModule:
             ):
                 if _get_dat_collection_count(public_policy_buckets) < 5:
                     public_policy_buckets.append(bucket_name)
+            if not _test_dat_bucket_policy_enforces_tls(policy_text):
+                if _get_dat_collection_count(buckets_without_tls_deny) < 5:
+                    buckets_without_tls_deny.append(bucket_name)
 
         evidence = {
             "bucket_count": _get_dat_collection_count(bucket_names),
             "buckets_with_policy": buckets_with_policy,
             "buckets_without_policy": buckets_without_policy,
             "public_policy_buckets": list(public_policy_buckets),
+            "buckets_without_tls_deny": list(buckets_without_tls_deny),
         }
         if _get_dat_collection_count(public_policy_buckets) > 0:
             return ctx.results.audit_result(
@@ -775,6 +835,16 @@ def get_domain() -> DomainModule:
                 "FAIL",
                 evidence,
                 "One or more bucket policies allow public principal access",
+            )
+        if _get_dat_collection_count(buckets_without_tls_deny) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "DAT-16",
+                "FAIL",
+                evidence,
+                "One or more bucket policies are missing a Deny rule for aws:SecureTransport=false",
             )
         if buckets_without_policy > 0:
             return ctx.results.audit_result(
@@ -1166,8 +1236,9 @@ def get_domain() -> DomainModule:
                 access_policy_value = str(describe_data.get("AccessPolicy") or "")
                 if access_policy_value:
                     access_policy_present = True
-                    if re.search(r"DeleteRecoveryPoint", access_policy_value, re.IGNORECASE):
-                        delete_recovery_point_denied = True
+                    delete_recovery_point_denied = _test_dat_backup_policy_denies_delete_recovery(
+                        access_policy_value
+                    )
 
             vault_ok = bool(encryption_key_arn) and access_policy_present and delete_recovery_point_denied
             if vault_ok:

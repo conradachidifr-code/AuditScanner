@@ -424,6 +424,7 @@ _IAM_ROLE_SEPARATION_PATTERNS = {
     "security": re.compile(r"secur|audit|compliance", re.IGNORECASE),
     "operations": re.compile(r"ops|operat|exploit|deploy", re.IGNORECASE),
     "network": re.compile(r"network|net-|vpc|tgw", re.IGNORECASE),
+    "readonly": re.compile(r"read|viewer|readonly", re.IGNORECASE),
 }
 
 _KMS_ADMIN_ACTION_PATTERN = re.compile(
@@ -457,14 +458,25 @@ def _iam_root_credential_usage(ctx: CheckContext) -> dict[str, Any] | None:
 
 def _iam_role_separation_evidence(roles: list[dict[str, Any]]) -> dict[str, Any]:
     buckets: dict[str, list[str]] = {name: [] for name in _IAM_ROLE_SEPARATION_PATTERNS}
+    cumulation_suspects: list[dict[str, Any]] = []
     for role in roles:
         role_name = str(property_value(role, ["RoleName"]) or "")
-        for bucket_name, pattern in _IAM_ROLE_SEPARATION_PATTERNS.items():
-            if pattern.search(role_name) and len(buckets[bucket_name]) < 5:
+        matched_buckets = [
+            bucket_name
+            for bucket_name, pattern in _IAM_ROLE_SEPARATION_PATTERNS.items()
+            if pattern.search(role_name)
+        ]
+        if len(matched_buckets) >= 2 and len(cumulation_suspects) < 10:
+            cumulation_suspects.append({"role_name": role_name, "matched_buckets": matched_buckets})
+        for bucket_name in matched_buckets:
+            if len(buckets[bucket_name]) < 5:
                 buckets[bucket_name].append(role_name)
     return {
-        bucket_name: {"count": len(sample_roles), "sample_roles": sample_roles}
-        for bucket_name, sample_roles in buckets.items()
+        "role_buckets": {
+            bucket_name: {"count": len(sample_roles), "sample_roles": sample_roles}
+            for bucket_name, sample_roles in buckets.items()
+        },
+        "cumulation_suspects": cumulation_suspects,
     }
 
 
@@ -499,18 +511,12 @@ def _iam_customer_master_keys(ctx: CheckContext) -> list[dict[str, Any]] | None:
 
 def _iam_is_ccoe_key(ctx: CheckContext, key_metadata: dict[str, Any]) -> bool:
     key_id = str(property_value(key_metadata, ["KeyId"]) or "")
-    alias_data = ctx.invoke_aws_cli(["kms", "list-aliases", "--key-id", key_id])
-    if alias_data and has_property(alias_data, "Aliases"):
-        for alias in cli_array(property_value(alias_data, ["Aliases"])):
-            alias_name = str(property_value(alias, ["AliasName"]) or "").lower()
-            if "ccoe" in alias_name:
-                return True
     tag_data = ctx.invoke_aws_cli(["kms", "list-resource-tags", "--key-id", key_id])
     if tag_data and has_property(tag_data, "Tags"):
         for tag in cli_array(property_value(tag_data, ["Tags"])):
-            tag_key = str(property_value(tag, ["TagKey"]) or "").lower()
-            tag_value = str(property_value(tag, ["TagValue"]) or "").lower()
-            if "ccoe" in tag_key or "ccoe" in tag_value:
+            tag_key = str(property_value(tag, ["TagKey"]) or "")
+            tag_value = str(property_value(tag, ["TagValue"]) or "")
+            if tag_key == "CCOE-DO-NOT-DELETE" and tag_value.upper() == "TRUE":
                 return True
     return False
 
@@ -957,8 +963,24 @@ def get_domain() -> DomainModule:
         if roles is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "IAM-10")
         separation = _iam_role_separation_evidence(roles)
-        populated_buckets = [name for name, data in separation.items() if data["count"] > 0]
-        evidence = {"role_count": collection_count(roles), "role_buckets": separation}
+        populated_buckets = [
+            name for name, data in separation["role_buckets"].items() if data["count"] > 0
+        ]
+        evidence = {
+            "role_count": collection_count(roles),
+            "role_buckets": separation["role_buckets"],
+            "cumulation_suspects": separation["cumulation_suspects"],
+        }
+        if collection_count(separation["cumulation_suspects"]) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "IAM-10",
+                "PARTIAL",
+                evidence,
+                "One or more roles match multiple functional naming buckets; verify role separation",
+            )
         if len(populated_buckets) >= 3:
             return ctx.results.audit_result(
                 account_id,
@@ -1440,6 +1462,16 @@ def get_domain() -> DomainModule:
             "roles_with_oidc_audience": roles_with_oidc_audience,
             "roles_missing_oidc_audience": roles_missing_oidc_audience,
         }
+        if collection_count(providers) > 0 and roles_missing_oidc_audience > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "IAM-20",
+                "FAIL",
+                evidence,
+                "OIDC-trusted roles are missing audience or subject conditions",
+            )
         if collection_count(providers) > 0 and roles_with_oidc_audience > 0:
             return ctx.results.audit_result(
                 account_id,
@@ -1456,9 +1488,9 @@ def get_domain() -> DomainModule:
                 account_name,
                 region,
                 "IAM-20",
-                "PASS",
+                "PARTIAL",
                 evidence,
-                "OIDC provider configured for pipeline authentication",
+                "OIDC provider configured but no pipeline roles with audience or subject conditions were found",
             )
         return ctx.results.audit_result(
             account_id, account_name, region, "IAM-20", "FAIL", evidence, "No OIDC providers found"
@@ -1958,7 +1990,13 @@ def get_domain() -> DomainModule:
                 if property_value(status, ["recording"]) is True:
                     recorder_active = True
                     break
+        target_rule_names = (
+            "iam-root-access-key-check",
+            "iam-no-inline-policy-check",
+            "iam-user-no-policies-check",
+        )
         iam_rules: list[str] = []
+        matched_target_rules: list[str] = []
         if rules_data and has_property(rules_data, "ConfigRules"):
             for rule in cli_array(property_value(rules_data, ["ConfigRules"])):
                 if not isinstance(rule, dict):
@@ -1966,14 +2004,34 @@ def get_domain() -> DomainModule:
                 rule_name = str(property_value(rule, ["ConfigRuleName"]) or "")
                 if re.search(r"IAM|iam", rule_name):
                     iam_rules.append(rule_name)
+                lower_name = rule_name.lower()
+                if any(target in lower_name for target in target_rule_names):
+                    matched_target_rules.append(rule_name)
         evidence = {
             "recorder_active": recorder_active,
             "iam_rule_count": collection_count(iam_rules),
             "iam_rule_names": list(iam_rules),
+            "matched_target_rules": list(matched_target_rules),
         }
+        if recorder_active and collection_count(matched_target_rules) >= 2:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "IAM-39",
+                "PASS",
+                evidence,
+                "Config recorder active with targeted IAM managed rules",
+            )
         if recorder_active and collection_count(iam_rules) > 0:
             return ctx.results.audit_result(
-                account_id, account_name, region, "IAM-39", "PASS", evidence, "Config recorder active with IAM rules"
+                account_id,
+                account_name,
+                region,
+                "IAM-39",
+                "PARTIAL",
+                evidence,
+                "Config recorder active with IAM rules but missing some targeted IAM managed rules",
             )
         return ctx.results.audit_result(
             account_id, account_name, region, "IAM-39", "FAIL", evidence, "No Config recording or no IAM Config rules"
@@ -2562,21 +2620,32 @@ def get_domain() -> DomainModule:
         trail_data = ctx.invoke_aws_cli(["cloudtrail", "describe-trails"])
         multi_region_trails: list[str] = []
         active_multi_region_trails: list[str] = []
+        organization_trails: list[str] = []
+        active_organization_trails: list[str] = []
         if trail_data and has_property(trail_data, "trailList"):
             for trail in cli_array(property_value(trail_data, ["trailList"])):
-                if property_value(trail, ["IsMultiRegionTrail"]) is True:
-                    trail_name = str(property_value(trail, ["Name"]) or "")
+                trail_name = str(property_value(trail, ["Name"]) or "")
+                is_multi_region = property_value(trail, ["IsMultiRegionTrail"]) is True
+                is_organization = property_value(trail, ["IsOrganizationTrail"]) is True
+                if is_multi_region:
                     multi_region_trails.append(trail_name)
-                    status = ctx.invoke_aws_cli(["cloudtrail", "get-trail-status", "--name", trail_name])
-                    if status and property_value(status, ["IsLogging"]) is True:
+                if is_organization:
+                    organization_trails.append(trail_name)
+                status = ctx.invoke_aws_cli(["cloudtrail", "get-trail-status", "--name", trail_name])
+                if status and property_value(status, ["IsLogging"]) is True:
+                    if is_multi_region:
                         active_multi_region_trails.append(trail_name)
+                    if is_organization:
+                        active_organization_trails.append(trail_name)
         evidence = {
             "sso_event_count_last_7_days": event_count,
             "multi_region_trail_count": collection_count(multi_region_trails),
             "multi_region_trail_names": multi_region_trails[:10],
             "active_multi_region_trail_count": collection_count(active_multi_region_trails),
+            "organization_trail_count": collection_count(organization_trails),
+            "active_organization_trail_count": collection_count(active_organization_trails),
         }
-        if event_count > 0 and collection_count(active_multi_region_trails) > 0:
+        if event_count > 0 and collection_count(active_organization_trails) > 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -2584,7 +2653,17 @@ def get_domain() -> DomainModule:
                 "IAM-54",
                 "PASS",
                 evidence,
-                "SSO events visible in CloudTrail and at least one multi-region trail is configured",
+                "SSO events visible in CloudTrail and an active organization trail is configured",
+            )
+        if event_count > 0 and collection_count(active_multi_region_trails) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "IAM-54",
+                "PARTIAL",
+                evidence,
+                "SSO events are visible but no active organization CloudTrail trail was detected",
             )
         if event_count > 0:
             return ctx.results.audit_result(
@@ -2594,7 +2673,7 @@ def get_domain() -> DomainModule:
                 "IAM-54",
                 "PARTIAL",
                 evidence,
-                "SSO events are visible but no multi-region CloudTrail trail was detected",
+                "SSO events are visible but no active multi-region CloudTrail trail was detected",
             )
         return ctx.results.audit_result(
             account_id, account_name, region, "IAM-54", "FAIL", evidence, "No SSO events in CloudTrail"

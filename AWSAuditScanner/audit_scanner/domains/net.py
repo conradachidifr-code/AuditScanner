@@ -298,6 +298,47 @@ def _evaluate_net_exposed_api(ctx: CheckContext, api_id: str, api_name: str) -> 
     }
 
 
+def _evaluate_net_http_api(ctx: CheckContext, api_id: str, api_name: str) -> dict[str, Any]:
+    routes_data = ctx.invoke_aws_cli(["apigatewayv2", "get-routes", "--api-id", api_id])
+    unauthenticated_routes = 0
+    route_count = 0
+    if routes_data and _test_net_has_property(routes_data, "Items"):
+        for route in _get_net_cli_array(routes_data.get("Items")):
+            route_count += 1
+            authorization_type = str(route.get("AuthorizationType", "") or "")
+            if authorization_type.upper() == "NONE":
+                unauthenticated_routes += 1
+
+    throttled = False
+    logged = False
+    stage_data = ctx.invoke_aws_cli(["apigatewayv2", "get-stage", "--api-id", api_id, "--stage-name", "$default"])
+    if stage_data:
+        route_settings = stage_data.get("DefaultRouteSettings")
+        if isinstance(route_settings, dict):
+            if route_settings.get("ThrottlingRateLimit") is not None:
+                throttled = True
+        access_log_settings = stage_data.get("AccessLogSettings")
+        if isinstance(access_log_settings, dict) and access_log_settings.get("DestinationArn"):
+            logged = True
+
+    waf_protected = False
+    stage_arn = f"arn:aws:apigateway:{ctx.aws.region}::/apis/{api_id}/stages/$default"
+    waf_data = ctx.invoke_aws_cli(["wafv2", "get-web-acl-for-resource", "--resource-arn", stage_arn])
+    if waf_data is not None and _test_net_has_property(waf_data, "WebACL"):
+        waf_protected = True
+
+    return {
+        "api_id": api_id,
+        "api_name": api_name,
+        "protocol": "HTTP",
+        "route_count": route_count,
+        "unauthenticated_route_count": unauthenticated_routes,
+        "throttled": throttled,
+        "logged": logged,
+        "waf_protected": waf_protected,
+    }
+
+
 def get_domain() -> DomainModule:
     checks: OrderedDict[str, object] = OrderedDict()
 
@@ -1329,13 +1370,10 @@ def get_domain() -> DomainModule:
         http_api_summaries: list[dict[str, Any]] = []
         if http_data and _test_net_has_property(http_data, "Items"):
             for api in _get_net_cli_array(http_data.get("Items")):
-                http_api_summaries.append(
-                    {
-                        "api_id": str(api.get("ApiId", "") or ""),
-                        "name": str(api.get("Name", "") or ""),
-                        "protocol": str(api.get("ProtocolType", "") or ""),
-                    }
-                )
+                api_id = str(api.get("ApiId", "") or "")
+                api_name = str(api.get("Name", "") or "")
+                if api_id:
+                    http_api_summaries.append(_evaluate_net_http_api(ctx, api_id, api_name))
 
         if _get_net_collection_count(apis) == 0 and _get_net_collection_count(http_api_summaries) == 0:
             return ctx.results.not_applicable_no_resources(
@@ -1358,14 +1396,24 @@ def get_domain() -> DomainModule:
             else:
                 passing_apis.append(api)
 
+        failing_http_apis: list[dict[str, Any]] = []
+        passing_http_apis: list[dict[str, Any]] = []
+        for api in http_api_summaries:
+            unauth = int(api.get("unauthenticated_route_count", 0) or 0)
+            if unauth > 0 or not api.get("throttled") or not api.get("logged") or not api.get("waf_protected"):
+                failing_http_apis.append(api)
+            else:
+                passing_http_apis.append(api)
+
         evidence = {
             "rest_api_count": _get_net_collection_count(apis),
             "http_api_count": _get_net_collection_count(http_api_summaries),
             "passing_rest_apis": list(passing_apis),
             "failing_rest_apis": list(failing_apis),
-            "http_apis": list(http_api_summaries),
+            "passing_http_apis": list(passing_http_apis),
+            "failing_http_apis": list(failing_http_apis),
         }
-        if _get_net_collection_count(failing_apis) > 0:
+        if _get_net_collection_count(failing_apis) > 0 or _get_net_collection_count(failing_http_apis) > 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -1375,16 +1423,6 @@ def get_domain() -> DomainModule:
                 evidence,
                 "One or more exposed APIs lack authentication, throttling, logging or WAF protection",
             )
-        if _get_net_collection_count(http_api_summaries) > 0:
-            return ctx.results.audit_result(
-                account_id,
-                account_name,
-                region,
-                "NET-18",
-                "PARTIAL",
-                evidence,
-                "REST APIs are protected; review HTTP APIs (v2) separately",
-            )
         return ctx.results.audit_result(
             account_id,
             account_name,
@@ -1392,7 +1430,7 @@ def get_domain() -> DomainModule:
             "NET-18",
             "PASS",
             evidence,
-            "Exposed REST APIs have authentication, throttling, logging and WAF protection",
+            "Exposed REST and HTTP APIs have authentication, throttling, logging and WAF protection",
         )
 
     checks["NET-18"] = net18
@@ -1795,6 +1833,16 @@ def get_domain() -> DomainModule:
                 "FAIL",
                 evidence,
                 "Direct peering between prod and non-prod environments detected",
+            )
+        if prod_tgw_attachments > 0 and nonprod_tgw_attachments > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "NET-25",
+                "FAIL",
+                evidence,
+                "Prod and non-prod Transit Gateway attachments detected in the same account",
             )
         if _get_net_collection_count(peerings) > 0:
             return ctx.results.audit_result(

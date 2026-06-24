@@ -923,7 +923,14 @@ def get_domain() -> DomainModule:
         billing_contact_data = ctx.invoke_aws_cli(
             ["account", "get-alternate-contact", "--alternate-contact-type", "BILLING"]
         )
-        if security_contact_data is None and billing_contact_data is None:
+        original_region = ctx.aws.region
+        support_data = None
+        try:
+            ctx.aws.region = "us-east-1"
+            support_data = ctx.invoke_aws_cli(["support", "describe-severity-levels"])
+        finally:
+            ctx.aws.region = original_region
+        if security_contact_data is None and billing_contact_data is None and support_data is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "ORG-18")
         security_email = None
         security_name = None
@@ -945,6 +952,7 @@ def get_domain() -> DomainModule:
                 "configured": bool(billing_email and billing_email.strip()),
                 "email": billing_email,
             },
+            "support_severity_levels_available": support_data is not None,
         }
         if not security_email or not security_email.strip():
             return ctx.results.audit_result(
@@ -960,6 +968,16 @@ def get_domain() -> DomainModule:
                 evidence,
                 "SECURITY contact uses a personal email address",
             )
+        if support_data is None:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "ORG-18",
+                "PARTIAL",
+                evidence,
+                "SECURITY contact configured but AWS Support plan could not be verified via Support API",
+            )
         return ctx.results.audit_result(
             account_id,
             account_name,
@@ -967,7 +985,7 @@ def get_domain() -> DomainModule:
             "ORG-18",
             "PASS",
             evidence,
-            "SECURITY alternate contact configured with non-personal email",
+            "SECURITY alternate contact configured and AWS Support API is available",
         )
 
     checks["ORG-18"] = org18

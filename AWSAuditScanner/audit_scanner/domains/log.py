@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
@@ -41,6 +42,56 @@ def _string(value: Any) -> str:
     if value is None:
         return ""
     return str(value)
+
+
+def _invoke_log_aws_cli_in_region(ctx: CheckContext, arguments: list[str], region: str) -> Any | None:
+    original_region = ctx.aws.region
+    try:
+        ctx.aws.region = region
+        return ctx.invoke_aws_cli(arguments)
+    finally:
+        ctx.aws.region = original_region
+
+
+def _log_roles_with_delete_log_group_permission(ctx: CheckContext) -> list[str]:
+    data = ctx.invoke_aws_cli(["iam", "get-account-authorization-details", "--filter", "Role"])
+    if data is None or not has_property(data, "RoleDetailList"):
+        return []
+    matching_roles: list[str] = []
+    for role in cli_array(property_value(data, ["RoleDetailList"])):
+        if not isinstance(role, dict):
+            continue
+        role_name = _string(property_value(role, ["RoleName"]))
+        policy_texts: list[str] = []
+        for policy in cli_array(property_value(role, ["RolePolicyList"])):
+            if isinstance(policy, dict):
+                policy_texts.append(_string(property_value(policy, ["PolicyDocument"])))
+        for policy in cli_array(property_value(role, ["AttachedManagedPolicies"])):
+            if not isinstance(policy, dict):
+                continue
+            policy_arn = _string(property_value(policy, ["PolicyArn"]))
+            if not policy_arn:
+                continue
+            policy_meta = ctx.invoke_aws_cli(["iam", "get-policy", "--policy-arn", policy_arn])
+            default_version = _string(
+                property_value(property_value(policy_meta, ["Policy"]), ["DefaultVersionId"])
+            )
+            if not default_version:
+                continue
+            version_data = ctx.invoke_aws_cli(
+                ["iam", "get-policy-version", "--policy-arn", policy_arn, "--version-id", default_version]
+            )
+            document = property_value(version_data, ["PolicyVersion", "Document"]) if version_data else None
+            if document is not None:
+                policy_texts.append(json.dumps(document))
+        for policy_text in policy_texts:
+            if re.search(r"logs:DeleteLogGroup|logs:\*", policy_text):
+                if role_name and role_name not in matching_roles:
+                    matching_roles.append(role_name)
+                break
+        if len(matching_roles) >= 10:
+            break
+    return matching_roles
 
 
 def _truthy(value: Any) -> bool:
@@ -972,27 +1023,41 @@ def get_domain() -> DomainModule:
         }
 
     def _log_cloudfront_logging_evidence(ctx: CheckContext) -> dict[str, Any]:
-        data = ctx.invoke_aws_cli(["cloudfront", "list-distributions"])
-        if data is None:
+        list_data = _invoke_log_aws_cli_in_region(ctx, ["cloudfront", "list-distributions"], "us-east-1")
+        if list_data is None:
             return {"api_available": False, "distribution_count": 0, "with_logging": 0, "without_logging": []}
 
         items: list[dict[str, Any]] = []
-        if has_property(data, "DistributionList") and has_property(property_value(data, ["DistributionList"]), ["Items"]):
+        if has_property(list_data, "DistributionList") and has_property(property_value(list_data, ["DistributionList"]), ["Items"]):
             items = [
                 item
-                for item in cli_array(property_value(property_value(data, ["DistributionList"]), ["Items"]))
+                for item in cli_array(property_value(property_value(list_data, ["DistributionList"]), ["Items"]))
                 if isinstance(item, dict)
             ]
         with_logging = 0
         without_logging: list[str] = []
         for distribution in items:
+            distribution_id = _string(property_value(distribution, ["Id"]))
             domain_name = _string(property_value(distribution, ["DomainName"]))
-            logging_config = property_value(distribution, ["Logging"])
-            enabled = _truthy(property_value(logging_config, ["Enabled"])) if isinstance(logging_config, dict) else False
+            enabled = False
+            if distribution_id:
+                config_data = _invoke_log_aws_cli_in_region(
+                    ctx,
+                    ["cloudfront", "get-distribution-config", "--id", distribution_id],
+                    "us-east-1",
+                )
+                if config_data and has_property(config_data, "DistributionConfig"):
+                    logging_config = property_value(property_value(config_data, ["DistributionConfig"]), ["Logging"])
+                    if isinstance(logging_config, dict):
+                        enabled = _truthy(property_value(logging_config, ["Enabled"]))
+            if not enabled:
+                list_logging = property_value(distribution, ["Logging"])
+                if isinstance(list_logging, dict):
+                    enabled = _truthy(property_value(list_logging, ["Enabled"]))
             if enabled:
                 with_logging += 1
             elif collection_count(without_logging) < 10:
-                without_logging.append(domain_name)
+                without_logging.append(domain_name or distribution_id)
         return {
             "api_available": True,
             "distribution_count": collection_count(items),
@@ -1291,10 +1356,13 @@ def get_domain() -> DomainModule:
                 if not has_target:
                     rules_without_targets.append(rule_name)
 
+        roles_with_delete_permission = _log_roles_with_delete_log_group_permission(ctx)
         evidence = {
             "log_deletion_rule_count": collection_count(matched_rules),
             "matched_rules": list(matched_rules[:10]),
             "rules_without_targets": list(rules_without_targets[:10]),
+            "roles_with_delete_log_group_permission": list(roles_with_delete_permission),
+            "roles_with_delete_log_group_permission_count": collection_count(roles_with_delete_permission),
         }
         if collection_count(matched_rules) == 0:
             return ctx.results.audit_result(
@@ -1315,6 +1383,16 @@ def get_domain() -> DomainModule:
                 "PARTIAL",
                 evidence,
                 "Log deletion rules exist but some have no SNS, Lambda or SQS targets",
+            )
+        if collection_count(roles_with_delete_permission) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "LOG-21",
+                "PARTIAL",
+                evidence,
+                "Roles with logs:DeleteLogGroup permission detected; verify least privilege and alerting coverage",
             )
         return ctx.results.audit_result(
             account_id,

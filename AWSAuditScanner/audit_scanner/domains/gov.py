@@ -500,16 +500,19 @@ def get_domain() -> DomainModule:
     def gov16(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
         deprecated_runtimes = [
             "nodejs12.x",
+            "nodejs14.x",
             "nodejs10.x",
             "nodejs8.10",
             "python2.7",
             "python3.6",
             "python3.7",
+            "python3.8",
             "ruby2.5",
             "ruby2.7",
             "dotnetcore2.1",
             "dotnetcore3.1",
             "java8",
+            "go1.x",
         ]
         data = ctx.invoke_aws_cli(["lambda", "list-functions", "--max-items", "1000"])
         if data is None:
