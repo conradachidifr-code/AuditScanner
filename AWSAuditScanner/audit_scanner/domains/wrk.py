@@ -285,14 +285,12 @@ def get_domain() -> DomainModule:
         if functions is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "WRK-06")
         if collection_count(functions) == 0:
-            return ctx.results.audit_result(
+            return ctx.results.not_applicable_no_resources(
                 account_id,
                 account_name,
                 region,
                 "WRK-06",
-                "PARTIAL",
                 {"lambda_count": 0},
-                "No Lambda functions found in region",
             )
 
         with_vpc = 0
@@ -503,14 +501,12 @@ def get_domain() -> DomainModule:
         if has_property(list_data, "taskDefinitionArns"):
             task_defs = cli_array(list_data.get("taskDefinitionArns"))
         if collection_count(task_defs) == 0:
-            return ctx.results.audit_result(
+            return ctx.results.not_applicable_no_resources(
                 account_id,
                 account_name,
                 region,
                 "WRK-17",
-                "PARTIAL",
                 {"task_definition_count": 0},
-                "No active ECS task definitions found",
             )
 
         with_role = 0
@@ -580,14 +576,12 @@ def get_domain() -> DomainModule:
             "scan_on_push": scan_on_push,
         }
         if repo_count == 0:
-            return ctx.results.audit_result(
+            return ctx.results.not_applicable_no_resources(
                 account_id,
                 account_name,
                 region,
                 "WRK-18",
-                "PARTIAL",
                 evidence,
-                "No ECR repositories found in region",
             )
         if scan_on_push:
             return ctx.results.audit_result(
@@ -620,14 +614,12 @@ def get_domain() -> DomainModule:
         if has_property(list_data, "clusters"):
             clusters = cli_array(list_data.get("clusters"))
         if collection_count(clusters) == 0:
-            return ctx.results.audit_result(
+            return ctx.results.not_applicable_no_resources(
                 account_id,
                 account_name,
                 region,
                 "WRK-19",
-                "PARTIAL",
                 {"cluster_count": 0},
-                "No EKS clusters found in region",
             )
 
         cluster_evidence: list[dict[str, Any]] = []
@@ -698,14 +690,12 @@ def get_domain() -> DomainModule:
         if has_property(list_data, "clusters"):
             clusters = cli_array(list_data.get("clusters"))
         if collection_count(clusters) == 0:
-            return ctx.results.audit_result(
+            return ctx.results.not_applicable_no_resources(
                 account_id,
                 account_name,
                 region,
                 "WRK-20",
-                "PARTIAL",
                 {"cluster_count": 0},
-                "No EKS clusters found in region",
             )
 
         required_types = {"api", "audit", "authenticator"}
@@ -802,14 +792,12 @@ def get_domain() -> DomainModule:
                 "Publicly accessible RDS instances found",
             )
         if private_count == 0 and public_count == 0:
-            return ctx.results.audit_result(
+            return ctx.results.not_applicable_no_resources(
                 account_id,
                 account_name,
                 region,
                 "WRK-21",
-                "PARTIAL",
                 evidence,
-                "No RDS instances found in region",
             )
         return ctx.results.audit_result(
             account_id,
@@ -954,14 +942,12 @@ def get_domain() -> DomainModule:
             "encrypted_topic_count": encrypted_topics,
         }
         if total_queues == 0 and total_topics == 0:
-            return ctx.results.audit_result(
+            return ctx.results.not_applicable_no_resources(
                 account_id,
                 account_name,
                 region,
                 "WRK-23",
-                "PARTIAL",
                 evidence,
-                "No SQS queues or SNS topics found in region",
             )
         if unencrypted_queues == 0 and unencrypted_topics == 0:
             return ctx.results.audit_result(
@@ -994,14 +980,12 @@ def get_domain() -> DomainModule:
         if has_property(api_data, "items"):
             apis = cli_array(api_data.get("items"))
         if collection_count(apis) == 0:
-            return ctx.results.audit_result(
+            return ctx.results.not_applicable_no_resources(
                 account_id,
                 account_name,
                 region,
                 "WRK-24",
-                "PARTIAL",
                 {"api_count": 0},
-                "No REST APIs found in region",
             )
 
         unauthenticated_methods = 0
@@ -1078,14 +1062,12 @@ def get_domain() -> DomainModule:
         if has_property(list_data, "UserPools"):
             pools = cli_array(list_data.get("UserPools"))
         if collection_count(pools) == 0:
-            return ctx.results.audit_result(
+            return ctx.results.not_applicable_no_resources(
                 account_id,
                 account_name,
                 region,
                 "WRK-26",
-                "PARTIAL",
                 {"user_pool_count": 0},
-                "No Cognito user pools found in region",
             )
 
         pool_evidence: list[dict[str, str]] = []

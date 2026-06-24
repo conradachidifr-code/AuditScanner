@@ -78,6 +78,27 @@ def _bck_describe_backup_vault(ctx: CheckContext, vault_name: str) -> dict[str, 
     return ctx.invoke_aws_cli(["backup", "describe-backup-vault", "--backup-vault-name", vault_name])
 
 
+def _bck_arn_resource_type(resource_text: str) -> str | None:
+    patterns: list[tuple[str, str]] = [
+        (r":ec2:", "EC2"),
+        (r":rds:", "RDS"),
+        (r":aurora:", "Aurora"),
+        (r":elasticfilesystem:", "EFS"),
+        (r":dynamodb:", "DynamoDB"),
+        (r":redshift:", "Redshift"),
+        (r":fsx:", "FSx"),
+        (r":s3:", "S3"),
+        (r":documentdb:", "DocumentDB"),
+        (r":neptune:", "Neptune"),
+        (r":storagegateway:", "StorageGateway"),
+        (r":timestream:", "Timestream"),
+    ]
+    for pattern, label in patterns:
+        if re.search(pattern, resource_text, re.IGNORECASE):
+            return label
+    return None
+
+
 def _bck_selection_resource_types(ctx: CheckContext, backup_plan_id: str) -> list[str]:
     list_data = ctx.invoke_aws_cli(["backup", "list-backup-selections", "--backup-plan-id", backup_plan_id])
     if list_data is None or not has_property(list_data, "BackupSelectionsList"):
@@ -108,14 +129,9 @@ def _bck_selection_resource_types(ctx: CheckContext, backup_plan_id: str) -> lis
         resources = cli_array(property_value(backup_selection, ["Resources"]))
         for resource in resources:
             resource_text = str(resource)
-            if re.search(r":ec2:", resource_text, re.IGNORECASE) and "EC2" not in resource_types:
-                resource_types.append("EC2")
-            if re.search(r":rds:", resource_text, re.IGNORECASE) and "RDS" not in resource_types:
-                resource_types.append("RDS")
-            if re.search(r":elasticfilesystem:", resource_text, re.IGNORECASE) and "EFS" not in resource_types:
-                resource_types.append("EFS")
-            if re.search(r":dynamodb:", resource_text, re.IGNORECASE) and "DynamoDB" not in resource_types:
-                resource_types.append("DynamoDB")
+            resource_type = _bck_arn_resource_type(resource_text)
+            if resource_type and resource_type not in resource_types:
+                resource_types.append(resource_type)
 
         tags = property_value(backup_selection, ["ListOfTags"])
         if collection_count(tags) > 0 and "TAGGED" not in resource_types:
@@ -312,6 +328,29 @@ def _bck_dynamodb_pitr_evidence(ctx: CheckContext) -> dict[str, Any] | None:
         "enabled_count": enabled_count,
         "disabled_count": disabled_count,
         "tables": table_evidence,
+    }
+
+
+def _bck_redshift_retention_evidence(ctx: CheckContext) -> dict[str, Any] | None:
+    data = ctx.invoke_aws_cli(["redshift", "describe-clusters"])
+    if data is None:
+        return None
+
+    clusters = cli_array(data.get("Clusters")) if has_property(data, "Clusters") else []
+    failing_clusters: list[str] = []
+    cluster_evidence: list[dict[str, Any]] = []
+
+    for cluster in clusters:
+        cluster_id = str(property_value(cluster, ["ClusterIdentifier"]) or "")
+        retention = int(property_value(cluster, ["AutomatedSnapshotRetentionPeriod"]) or 0)
+        cluster_evidence.append({"cluster_id": cluster_id, "retention_days": retention})
+        if retention < 7 and collection_count(failing_clusters) < 10:
+            failing_clusters.append(cluster_id)
+
+    return {
+        "cluster_count": collection_count(clusters),
+        "clusters": cluster_evidence,
+        "failing_clusters": failing_clusters,
     }
 
 
@@ -590,7 +629,7 @@ def get_domain() -> DomainModule:
 
         type_counts = protected_evidence.get("resource_type_counts", {})
         has_plan_ec2 = "EC2" in covered_types or "TAGGED" in covered_types
-        has_plan_rds = "RDS" in covered_types or "TAGGED" in covered_types
+        has_plan_rds = "RDS" in covered_types or "Aurora" in covered_types or "TAGGED" in covered_types
         has_plan_efs = "EFS" in covered_types or "TAGGED" in covered_types
         has_plan_dynamo = "DynamoDB" in covered_types or "TAGGED" in covered_types
         plans_cover_all = has_plan_ec2 and has_plan_rds and has_plan_efs and has_plan_dynamo
@@ -598,10 +637,28 @@ def get_domain() -> DomainModule:
         efs_ok = efs_evidence["efs_count"] == 0 or efs_evidence["disabled_count"] == 0
         dynamo_ok = dynamodb_evidence["table_count"] == 0 or dynamodb_evidence["disabled_count"] == 0
         protected_ok = (
-            ("EC2" in type_counts or "EBS" in type_counts)
-            and ("RDS" in type_counts or "Aurora" in type_counts)
-            and "EFS" in type_counts
+            protected_evidence["protected_resource_count"] == 0
+            or (
+                ("EC2" in type_counts or "EBS" in type_counts)
+                and ("RDS" in type_counts or "Aurora" in type_counts)
+                and "EFS" in type_counts
+            )
         )
+
+        resource_presence = {
+            "backup_plans": collection_count(plans),
+            "efs_file_systems": efs_evidence["efs_count"],
+            "dynamodb_tables": dynamodb_evidence["table_count"],
+            "protected_resources": protected_evidence["protected_resource_count"],
+        }
+        if sum(resource_presence.values()) == 0:
+            return ctx.results.not_applicable_no_resources(
+                account_id,
+                account_name,
+                region,
+                "BCK-03",
+                {"resource_presence": resource_presence, "plans": plan_evidence},
+            )
 
         evidence = {
             "plan_count": collection_count(plans),
@@ -688,24 +745,49 @@ def get_domain() -> DomainModule:
 
         plan_retention = _bck_plan_retention_evidence(ctx, plans)
         rds_retention = _bck_rds_retention_evidence(ctx)
-        if rds_retention is None:
+        efs_evidence = _bck_efs_backup_evidence(ctx)
+        dynamodb_evidence = _bck_dynamodb_pitr_evidence(ctx)
+        protected_evidence = _bck_protected_resource_evidence(ctx)
+        redshift_evidence = _bck_redshift_retention_evidence(ctx)
+        if (
+            rds_retention is None
+            or efs_evidence is None
+            or dynamodb_evidence is None
+            or protected_evidence is None
+            or redshift_evidence is None
+        ):
             return ctx.results.null_api_partial(account_id, account_name, region, "BCK-05")
 
-        evidence = {"backup_plan_rules": plan_retention, "rds_instances": rds_retention}
-        plan_ok = plan_retention["rule_count"] > 0 and plan_retention["failing_rules"] == 0
-        rds_ok = rds_retention["instance_count"] == 0 or collection_count(rds_retention["failing_instances"]) == 0
+        targets = {
+            "backup_plan_rules": plan_retention["rule_count"],
+            "rds_instances": rds_retention["instance_count"],
+            "efs_file_systems": efs_evidence["efs_count"],
+            "dynamodb_tables": dynamodb_evidence["table_count"],
+            "protected_resources": protected_evidence["protected_resource_count"],
+            "redshift_clusters": redshift_evidence["cluster_count"],
+        }
+        evidence = {
+            "targets": targets,
+            "backup_plan_rules": plan_retention,
+            "rds_instances": rds_retention,
+            "efs": efs_evidence,
+            "dynamodb": dynamodb_evidence,
+            "protected_resources": protected_evidence,
+            "redshift_clusters": redshift_evidence,
+        }
+        if sum(targets.values()) == 0:
+            return ctx.results.not_applicable_no_resources(account_id, account_name, region, "BCK-05", evidence)
 
-        if plan_retention["rule_count"] == 0 and rds_retention["instance_count"] == 0:
-            return ctx.results.audit_result(
-                account_id,
-                account_name,
-                region,
-                "BCK-05",
-                "PARTIAL",
-                evidence,
-                "No backup retention rules or RDS instances found to assess",
-            )
-        if plan_ok and rds_ok:
+        plan_ok = plan_retention["rule_count"] == 0 or plan_retention["failing_rules"] == 0
+        rds_ok = rds_retention["instance_count"] == 0 or collection_count(rds_retention["failing_instances"]) == 0
+        efs_ok = efs_evidence["efs_count"] == 0 or efs_evidence["disabled_count"] == 0
+        dynamo_ok = dynamodb_evidence["table_count"] == 0 or dynamodb_evidence["disabled_count"] == 0
+        redshift_ok = (
+            redshift_evidence["cluster_count"] == 0
+            or collection_count(redshift_evidence["failing_clusters"]) == 0
+        )
+
+        if plan_ok and rds_ok and efs_ok and dynamo_ok and redshift_ok:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -713,9 +795,9 @@ def get_domain() -> DomainModule:
                 "BCK-05",
                 "PASS",
                 evidence,
-                "Retention periods are defined and applied on backup plans and RDS",
+                "Retention periods are defined and applied on backup plans and in-scope data services",
             )
-        if plan_ok or rds_ok:
+        if plan_ok or rds_ok or efs_ok or dynamo_ok or redshift_ok:
             return ctx.results.audit_result(
                 account_id,
                 account_name,

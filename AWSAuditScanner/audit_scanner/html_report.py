@@ -16,6 +16,7 @@ def _status_badge(status: str) -> str:
         "FAIL": "#cf222e",
         "PARTIAL": "#bf8700",
         "NOT_TESTED": "#656d76",
+        "NOT_APPLICABLE": "#8250df",
     }
     color = colors.get(status, "#656d76")
     return f'<span style="color:{color};font-weight:600">{html.escape(status)}</span>'
@@ -33,30 +34,58 @@ def _successful_commands(commands: list[dict[str, Any]]) -> list[dict[str, Any]]
     return [command for command in commands if command.get("success")]
 
 
-def _format_command_output(commands: list[dict[str, Any]]) -> str:
-    successful = _successful_commands(commands)
-    if not successful:
+def _failed_commands(commands: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [command for command in commands if not command.get("success")]
+
+
+def _looks_like_permission_error(output: str) -> bool:
+    text = output.lower()
+    markers = (
+        "accessdenied",
+        "not authorized",
+        "unauthorized",
+        "authorizationerror",
+        "is not authorized to perform",
+        "explicit deny",
+        "no credentials",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _format_command_blocks(commands: list[dict[str, Any]], *, title_prefix: str, css_class: str) -> str:
+    if not commands:
         return ""
 
     blocks: list[str] = []
-    for index, command in enumerate(successful, start=1):
+    for index, command in enumerate(commands, start=1):
         command_line = html.escape(str(command.get("command") or ""))
         exit_code = command.get("exit_code")
         exit_label = f" (exit {exit_code})" if exit_code is not None else ""
         output = str(command.get("output") or "").strip()
+        permission_note = ""
+        if output and _looks_like_permission_error(output):
+            permission_note = '<p class="permission-error">Possible permission issue detected</p>'
         output_block = (
-            f'<pre class="command-output">{html.escape(output)}</pre>'
+            f'{permission_note}<pre class="{css_class}">{html.escape(output)}</pre>'
             if output
-            else '<p class="muted">No stdout captured</p>'
+            else '<p class="muted">No CLI output captured</p>'
         )
         blocks.append(
             '<div class="command-block">'
-            f'<div class="command-title">Command {index}{html.escape(exit_label)}</div>'
+            f'<div class="command-title">{html.escape(title_prefix)} {index}{html.escape(exit_label)}</div>'
             f'<pre class="command-line">{command_line}</pre>'
             f"{output_block}"
             "</div>"
         )
     return "".join(blocks)
+
+
+def _format_command_output(commands: list[dict[str, Any]]) -> str:
+    return _format_command_blocks(_successful_commands(commands), title_prefix="Command", css_class="command-output")
+
+
+def _format_failed_command_output(commands: list[dict[str, Any]]) -> str:
+    return _format_command_blocks(_failed_commands(commands), title_prefix="Failed command", css_class="command-output-failed")
 
 
 def _format_evidence(evidence: Any) -> str:
@@ -98,16 +127,30 @@ def _control_detail_rows(
             "</tr>"
         )
 
-        if status == "NOT_TESTED":
+        if status in {"NOT_TESTED", "NOT_APPLICABLE"}:
             continue
 
         detail_parts: list[str] = []
+        failed_command_html = _format_failed_command_output(commands)
+        if failed_command_html:
+            detail_parts.append(
+                "<section>"
+                f"<h4>Failed or null API calls ({len(_failed_commands(commands))})</h4>"
+                f"{failed_command_html}"
+                "</section>"
+            )
         if command_html:
             detail_parts.append(
                 "<section>"
-                f"<h4>CLI output ({len(_successful_commands(commands))} successful command(s))</h4>"
+                f"<h4>Successful CLI output ({len(_successful_commands(commands))} command(s))</h4>"
                 f"{command_html}"
                 "</section>"
+            )
+        if "possible permission issue" in notes.lower() and not failed_command_html:
+            detail_parts.append(
+                '<section><p class="permission-error">'
+                "Control notes indicate a possible permission issue but no failed CLI output was captured."
+                "</p></section>"
             )
         if evidence_html:
             detail_parts.append(
@@ -148,12 +191,14 @@ def write_html_report(
         total["Failed"] += summary["failed"]
         total["Partial"] += summary["partial"]
         total["Not Tested"] += summary["not_tested"]
+        total["Not Applicable"] += summary.get("not_applicable", 0)
         rows.append(
             "<tr>"
             f"<td>{html.escape(summary['account'])}</td>"
             f"<td>{summary['passed']}</td>"
             f"<td>{summary['failed']}</td>"
             f"<td>{summary['partial']}</td>"
+            f"<td>{summary.get('not_applicable', 0)}</td>"
             f"<td>{summary['not_tested']}</td>"
             "</tr>"
         )
@@ -211,6 +256,19 @@ def write_html_report(
       overflow-x: auto;
     }}
     .command-line {{ margin-bottom: 0.5rem; }}
+    .command-output-failed {{
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: Consolas, Monaco, monospace;
+      font-size: 0.82rem;
+      background: #3d130f;
+      color: #ffd8d3;
+      border-radius: 4px;
+      padding: 0.65rem 0.75rem;
+      overflow-x: auto;
+    }}
+    .permission-error {{ color: #cf222e; font-weight: 600; margin: 0.35rem 0; }}
     .muted {{ color: #656d76; font-style: italic; }}
     section + section {{ margin-top: 1rem; }}
   </style>
@@ -227,11 +285,12 @@ def write_html_report(
     <span>Passed: <strong>{total['Passed']}</strong></span>
     <span>Failed: <strong>{total['Failed']}</strong></span>
     <span>Partial: <strong>{total['Partial']}</strong></span>
+    <span>Not applicable: <strong>{total['Not Applicable']}</strong></span>
     <span>Not tested: <strong>{total['Not Tested']}</strong></span>
   </div>
   <h2>Summary by account</h2>
   <table>
-    <thead><tr><th>Account</th><th>Passed</th><th>Failed</th><th>Partial</th><th>Not Tested</th></tr></thead>
+    <thead><tr><th>Account</th><th>Passed</th><th>Failed</th><th>Partial</th><th>N/A</th><th>Not Tested</th></tr></thead>
     <tbody>{''.join(rows)}</tbody>
   </table>
   {''.join(detail_sections)}

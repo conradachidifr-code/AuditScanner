@@ -811,8 +811,8 @@ def get_domain() -> DomainModule:
                 "Flow Logs exist but TrafficType is not ALL on some VPCs",
             )
         if collection_count(vpcs) == 0:
-            return ctx.results.audit_result(
-                account_id, account_name, region, "LOG-12", "PARTIAL", evidence, "No VPCs found in region"
+            return ctx.results.not_applicable_no_resources(
+                account_id, account_name, region, "LOG-12", evidence, "No resources found"
             )
         return ctx.results.audit_result(
             account_id,
@@ -826,56 +826,176 @@ def get_domain() -> DomainModule:
 
     checks["LOG-12"] = log12
 
-    def log13(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
+    def _log_alb_access_log_evidence(ctx: CheckContext) -> dict[str, Any]:
         lb_data = ctx.invoke_aws_cli(["elbv2", "describe-load-balancers"])
         if lb_data is None:
-            return ctx.results.null_api_partial(account_id, account_name, region, "LOG-13")
+            return {"api_available": False, "alb_count": 0, "with_access_logs": 0, "without_access_logs": []}
 
-        load_balancers = cli_array(property_value(lb_data, ["LoadBalancers"])) if has_property(lb_data, "LoadBalancers") else []
-        if collection_count(load_balancers) == 0:
-            return ctx.results.audit_result(
-                account_id, account_name, region, "LOG-13", "PARTIAL", {"alb_count": 0}, "No ALBs found in region"
-            )
-
+        load_balancers = (
+            cli_array(property_value(lb_data, ["LoadBalancers"])) if has_property(lb_data, "LoadBalancers") else []
+        )
         with_access_logs = 0
         without_access_logs: list[str] = []
         for load_balancer in load_balancers:
             lb_arn = _string(property_value(load_balancer, ["LoadBalancerArn"]))
+            lb_name = _string(property_value(load_balancer, ["LoadBalancerName"]))
             if not lb_arn:
                 continue
             attr_data = ctx.invoke_aws_cli(
                 ["elbv2", "describe-load-balancer-attributes", "--load-balancer-arn", lb_arn]
             )
-            if attr_data is None:
-                if collection_count(without_access_logs) < 5:
-                    without_access_logs.append(_string(property_value(load_balancer, ["LoadBalancerName"])))
-                continue
-
             enabled = False
-            if has_property(attr_data, "Attributes"):
+            if attr_data is not None and has_property(attr_data, "Attributes"):
                 for attribute in cli_array(property_value(attr_data, ["Attributes"])):
                     key = _string(property_value(attribute, ["Key"]))
                     value = _string(property_value(attribute, ["Value"]))
                     if key == "access_logs.s3.enabled" and value == "true":
                         enabled = True
                         break
-
             if enabled:
                 with_access_logs += 1
-            elif collection_count(without_access_logs) < 5:
-                without_access_logs.append(_string(property_value(load_balancer, ["LoadBalancerName"])))
-
-        evidence = {
+            elif collection_count(without_access_logs) < 10:
+                without_access_logs.append(lb_name)
+        return {
+            "api_available": True,
             "alb_count": collection_count(load_balancers),
-            "alb_with_access_logs": with_access_logs,
-            "alb_without_access_logs": list(without_access_logs),
+            "with_access_logs": with_access_logs,
+            "without_access_logs": list(without_access_logs),
         }
-        if collection_count(without_access_logs) > 0:
+
+    def _log_waf_logging_evidence(ctx: CheckContext, scope: str) -> dict[str, Any]:
+        data = ctx.invoke_aws_cli(["wafv2", "list-web-acls", "--scope", scope])
+        if data is None:
+            return {
+                "api_available": False,
+                "scope": scope,
+                "web_acl_count": 0,
+                "with_logging": 0,
+                "without_logging": [],
+            }
+
+        web_acls = cli_array(property_value(data, ["WebACLs"])) if has_property(data, "WebACLs") else []
+        with_logging = 0
+        without_logging: list[str] = []
+        for web_acl in web_acls:
+            acl_name = _string(property_value(web_acl, ["Name"]))
+            acl_arn = _string(property_value(web_acl, ["ARN"]))
+            if not acl_arn:
+                continue
+            logging_data = ctx.invoke_aws_cli(["wafv2", "get-logging-configuration", "--resource-arn", acl_arn])
+            destinations = []
+            if logging_data is not None and has_property(logging_data, "LoggingConfiguration"):
+                destinations = cli_array(
+                    property_value(property_value(logging_data, ["LoggingConfiguration"]), ["LogDestinationConfigs"])
+                )
+            if collection_count(destinations) > 0:
+                with_logging += 1
+            elif collection_count(without_logging) < 10:
+                without_logging.append(acl_name)
+        return {
+            "api_available": True,
+            "scope": scope,
+            "web_acl_count": collection_count(web_acls),
+            "with_logging": with_logging,
+            "without_logging": list(without_logging),
+        }
+
+    def _log_cloudfront_logging_evidence(ctx: CheckContext) -> dict[str, Any]:
+        data = ctx.invoke_aws_cli(["cloudfront", "list-distributions"])
+        if data is None:
+            return {"api_available": False, "distribution_count": 0, "with_logging": 0, "without_logging": []}
+
+        items: list[dict[str, Any]] = []
+        if has_property(data, "DistributionList") and has_property(property_value(data, ["DistributionList"]), ["Items"]):
+            items = [
+                item
+                for item in cli_array(property_value(property_value(data, ["DistributionList"]), ["Items"]))
+                if isinstance(item, dict)
+            ]
+        with_logging = 0
+        without_logging: list[str] = []
+        for distribution in items:
+            domain_name = _string(property_value(distribution, ["DomainName"]))
+            logging_config = property_value(distribution, ["Logging"])
+            enabled = _truthy(property_value(logging_config, ["Enabled"])) if isinstance(logging_config, dict) else False
+            if enabled:
+                with_logging += 1
+            elif collection_count(without_logging) < 10:
+                without_logging.append(domain_name)
+        return {
+            "api_available": True,
+            "distribution_count": collection_count(items),
+            "with_logging": with_logging,
+            "without_logging": list(without_logging),
+        }
+
+    def log13(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
+        alb_evidence = _log_alb_access_log_evidence(ctx)
+        waf_regional_evidence = _log_waf_logging_evidence(ctx, "REGIONAL")
+        waf_cloudfront_evidence = _log_waf_logging_evidence(ctx, "CLOUDFRONT")
+        cloudfront_evidence = _log_cloudfront_logging_evidence(ctx)
+
+        if (
+            not alb_evidence["api_available"]
+            and not waf_regional_evidence["api_available"]
+            and not waf_cloudfront_evidence["api_available"]
+            and not cloudfront_evidence["api_available"]
+        ):
+            return ctx.results.null_api_partial(account_id, account_name, region, "LOG-13")
+
+        resource_counts = {
+            "alb_count": alb_evidence["alb_count"],
+            "regional_waf_count": waf_regional_evidence["web_acl_count"],
+            "cloudfront_waf_count": waf_cloudfront_evidence["web_acl_count"],
+            "cloudfront_distribution_count": cloudfront_evidence["distribution_count"],
+        }
+        evidence = {
+            "resource_counts": resource_counts,
+            "alb_access_logs": alb_evidence,
+            "waf_regional_logging": waf_regional_evidence,
+            "waf_cloudfront_logging": waf_cloudfront_evidence,
+            "cloudfront_logging": cloudfront_evidence,
+        }
+        if sum(resource_counts.values()) == 0:
+            return ctx.results.not_applicable_no_resources(account_id, account_name, region, "LOG-13", evidence)
+
+        issues: list[str] = []
+        if alb_evidence["alb_count"] > 0 and collection_count(alb_evidence["without_access_logs"]) > 0:
+            issues.append("ALB access logs missing")
+        if (
+            waf_regional_evidence["web_acl_count"] > 0
+            and collection_count(waf_regional_evidence["without_logging"]) > 0
+        ):
+            issues.append("Regional WAF logging missing")
+        if (
+            waf_cloudfront_evidence["web_acl_count"] > 0
+            and collection_count(waf_cloudfront_evidence["without_logging"]) > 0
+        ):
+            issues.append("CloudFront WAF logging missing")
+        if (
+            cloudfront_evidence["distribution_count"] > 0
+            and collection_count(cloudfront_evidence["without_logging"]) > 0
+        ):
+            issues.append("CloudFront access logging missing")
+
+        if collection_count(issues) > 0:
             return ctx.results.audit_result(
-                account_id, account_name, region, "LOG-13", "FAIL", evidence, "One or more ALBs missing access logs"
+                account_id,
+                account_name,
+                region,
+                "LOG-13",
+                "FAIL",
+                evidence,
+                "; ".join(issues),
             )
         return ctx.results.audit_result(
-            account_id, account_name, region, "LOG-13", "PASS", evidence, "All ALBs have access logs enabled"
+            account_id,
+            account_name,
+            region,
+            "LOG-13",
+            "PASS",
+            evidence,
+            "ALB, WAF and CloudFront logging requirements are satisfied for in-scope resources",
         )
 
     checks["LOG-13"] = log13

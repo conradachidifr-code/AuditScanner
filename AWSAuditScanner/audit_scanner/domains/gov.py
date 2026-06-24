@@ -501,7 +501,7 @@ def get_domain() -> DomainModule:
                 if has_property(status_data, "IsLogging"):
                     active_trail_count += 1
         cloudtrail_active = active_trail_count > 0
-        recorder_data = ctx.invoke_aws_cli(["config", "describe-configuration-recorders"])
+        recorder_data = ctx.invoke_aws_cli(["configservice", "describe-configuration-recorders"])
         config_recorder_active = False
         recorder_count = 0
         if recorder_data is not None and has_property(recorder_data, "ConfigurationRecorders"):
@@ -513,7 +513,7 @@ def get_domain() -> DomainModule:
                     if isinstance(recorder, dict) and has_property(recorder, "Name"):
                         recorder_names.append(str(property_value(recorder, ["Name"]) or ""))
                 if collection_count(recorder_names) > 0:
-                    status_args = ["config", "describe-configuration-recorder-status"]
+                    status_args = ["configservice", "describe-configuration-recorder-status"]
                     for recorder_name in recorder_names:
                         status_args.extend(["--configuration-recorder-names", recorder_name])
                     recorder_status_data = ctx.invoke_aws_cli(status_args)

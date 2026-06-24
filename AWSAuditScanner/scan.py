@@ -40,13 +40,16 @@ def _print_banner(domain: str, account_count: int, regions: str, auditor: str, d
 def _print_summary(summaries: list[dict]) -> None:
     print("")
     print("Summary")
-    header = f"{'Account':<20} {'Passed':>8} {'Failed':>8} {'Partial':>8} {'Not Tested':>12}"
+    header = (
+        f"{'Account':<20} {'Passed':>8} {'Failed':>8} {'Partial':>8} "
+        f"{'N/A':>8} {'Not Tested':>12}"
+    )
     print(header)
     print("-" * len(header))
     for row in summaries:
         print(
             f"{row['account']:<20} {row['passed']:>8} {row['failed']:>8} "
-            f"{row['partial']:>8} {row['not_tested']:>12}"
+            f"{row['partial']:>8} {row.get('not_applicable', 0):>8} {row['not_tested']:>12}"
         )
 
 

@@ -733,9 +733,7 @@ def get_domain() -> DomainModule:
                 evidence,
                 "Internet-exposed admin ports found despite SSM availability",
             )
-        return ctx.results.audit_result(
-            account_id, account_name, region, "NET-09", "PARTIAL", evidence, "No SSM-managed instances detected"
-        )
+        return ctx.results.not_applicable_no_resources(account_id, account_name, region, "NET-09", evidence)
 
     checks["NET-09"] = net09
 
@@ -1004,14 +1002,12 @@ def get_domain() -> DomainModule:
                     internet_facing.append(lb)
 
         if _get_net_collection_count(internet_facing) == 0:
-            return ctx.results.audit_result(
+            return ctx.results.not_applicable_no_resources(
                 account_id,
                 account_name,
                 region,
                 "NET-17",
-                "PARTIAL",
                 {"internet_facing_alb_count": 0},
-                "No internet-facing ALBs found in region",
             )
 
         failing_albs = _new_net_list()
@@ -1109,14 +1105,12 @@ def get_domain() -> DomainModule:
                 )
 
         if _get_net_collection_count(apis) == 0 and _get_net_collection_count(http_api_summaries) == 0:
-            return ctx.results.audit_result(
+            return ctx.results.not_applicable_no_resources(
                 account_id,
                 account_name,
                 region,
                 "NET-18",
-                "PARTIAL",
                 {"rest_api_count": 0, "http_api_count": 0},
-                "No public REST or HTTP APIs found in region",
             )
 
         failing_apis: list[dict[str, Any]] = []

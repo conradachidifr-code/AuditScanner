@@ -97,3 +97,22 @@ class ResultFactory:
             None,
             "API call returned null - possible permission issue",
         )
+
+    def not_applicable_no_resources(
+        self,
+        account_id: str,
+        account_name: str,
+        region: str,
+        control_id: str,
+        evidence: Any = None,
+        notes: str = "No resources found",
+    ) -> AuditResult:
+        return self.audit_result(
+            account_id,
+            account_name,
+            region,
+            control_id,
+            "NOT_APPLICABLE",
+            evidence,
+            notes,
+        )

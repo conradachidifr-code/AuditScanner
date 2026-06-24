@@ -1887,8 +1887,8 @@ def get_domain() -> DomainModule:
         gate = _iam_global_control_gate(account_id, account_name, region, "IAM-39", ctx)
         if gate:
             return gate
-        status_data = ctx.invoke_aws_cli(["config", "describe-configuration-recorder-status"])
-        rules_data = ctx.invoke_aws_cli(["config", "list-config-rules", "--max-results", "100"])
+        status_data = ctx.invoke_aws_cli(["configservice", "describe-configuration-recorder-status"])
+        rules_data = ctx.invoke_aws_cli(["configservice", "list-config-rules", "--max-results", "100"])
         if status_data is None and rules_data is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "IAM-39")
         recorder_active = False

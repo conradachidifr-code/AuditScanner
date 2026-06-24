@@ -40,7 +40,7 @@ class AccountScanResult:
 
 
 def _summary_row(account_name: str, results: list[AuditResult]) -> dict[str, Any]:
-    counts = {"passed": 0, "failed": 0, "partial": 0, "not_tested": 0}
+    counts = {"passed": 0, "failed": 0, "partial": 0, "not_tested": 0, "not_applicable": 0}
     for item in results:
         status = item.status
         if status == "PASS":
@@ -51,6 +51,8 @@ def _summary_row(account_name: str, results: list[AuditResult]) -> dict[str, Any
             counts["partial"] += 1
         elif status == "NOT_TESTED":
             counts["not_tested"] += 1
+        elif status == "NOT_APPLICABLE":
+            counts["not_applicable"] += 1
     return {"account": account_name, **counts}
 
 
