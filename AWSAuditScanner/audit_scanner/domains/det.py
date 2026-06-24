@@ -821,7 +821,8 @@ def get_domain() -> DomainModule:
         evidence = {"api_count": api_count, "protected_api_count": protected_api_count}
         if api_count == 0:
             return ctx.results.not_applicable_no_resources(
-                account_id, account_name, region, "DET-23", evidence, "No API Gateway REST APIs in region"
+                account_id, account_name, region, "DET-23", evidence,
+                "Control not applicable: no API Gateway REST APIs in this region",
             )
         if protected_api_count > 0:
             return ctx.results.audit_result(

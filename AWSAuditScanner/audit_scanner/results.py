@@ -6,6 +6,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+NOT_APPLICABLE_NOTES = (
+    "Control not applicable to this scope "
+    "(no in-scope service or resource, documented exception, or alternate solution in place)"
+)
+NOT_APPLICABLE_NO_SCOPE_NOTES = (
+    "Control not applicable: no in-scope service or resource detected in this account/region"
+)
 
 def _iso_timestamp() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat()
@@ -98,15 +105,16 @@ class ResultFactory:
             "API call returned null - possible permission issue",
         )
 
-    def not_applicable_no_resources(
+    def not_applicable(
         self,
         account_id: str,
         account_name: str,
         region: str,
         control_id: str,
         evidence: Any = None,
-        notes: str = "No resources found",
+        notes: str = NOT_APPLICABLE_NOTES,
     ) -> AuditResult:
+        """Control does not apply — e.g. no in-scope resource, exception, or alternate solution."""
         return self.audit_result(
             account_id,
             account_name,
@@ -116,3 +124,15 @@ class ResultFactory:
             evidence,
             notes,
         )
+
+    def not_applicable_no_resources(
+        self,
+        account_id: str,
+        account_name: str,
+        region: str,
+        control_id: str,
+        evidence: Any = None,
+        notes: str = NOT_APPLICABLE_NO_SCOPE_NOTES,
+    ) -> AuditResult:
+        """Automated N/A when technical checks find no in-scope resources."""
+        return self.not_applicable(account_id, account_name, region, control_id, evidence, notes)

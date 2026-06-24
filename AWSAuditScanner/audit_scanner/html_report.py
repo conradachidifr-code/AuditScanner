@@ -127,7 +127,7 @@ def _control_detail_rows(
             "</tr>"
         )
 
-        if status in {"NOT_TESTED", "NOT_APPLICABLE"}:
+        if status == "NOT_TESTED":
             continue
 
         detail_parts: list[str] = []
@@ -158,6 +158,15 @@ def _control_detail_rows(
                 "<h4>Evidence</h4>"
                 f"{evidence_html}"
                 "</section>"
+            )
+        if status == "NOT_APPLICABLE" and detail_parts:
+            detail_parts.insert(
+                0,
+                '<section><p class="na-context">'
+                "Not applicable means this control does not apply to the in-scope service or resource. "
+                "This may be because nothing is in scope here, a documented exception applies, "
+                "or an alternate solution is in place. Review the CLI output and evidence below."
+                "</p></section>",
             )
         if not detail_parts:
             continue
@@ -269,6 +278,8 @@ def write_html_report(
       overflow-x: auto;
     }}
     .permission-error {{ color: #cf222e; font-weight: 600; margin: 0.35rem 0; }}
+    .na-context {{ color: #57606a; margin: 0.35rem 0 0.75rem; line-height: 1.45; }}
+    .status-legend {{ color: #57606a; margin: 0 0 1.5rem; line-height: 1.45; max-width: 52rem; }}
     .muted {{ color: #656d76; font-style: italic; }}
     section + section {{ margin-top: 1rem; }}
   </style>
@@ -288,6 +299,11 @@ def write_html_report(
     <span>Not applicable: <strong>{total['Not Applicable']}</strong></span>
     <span>Not tested: <strong>{total['Not Tested']}</strong></span>
   </div>
+  <p class="status-legend">
+    <strong>Not applicable (N/A)</strong> — the control does not apply to the in-scope service or resource.
+    Common reasons: no matching resource in this account/region, a documented exception, or an alternate
+    solution already in place. N/A rows still include CLI output when checks were run to establish scope.
+  </p>
   <h2>Summary by account</h2>
   <table>
     <thead><tr><th>Account</th><th>Passed</th><th>Failed</th><th>Partial</th><th>N/A</th><th>Not Tested</th></tr></thead>

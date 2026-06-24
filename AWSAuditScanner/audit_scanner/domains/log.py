@@ -883,7 +883,7 @@ def get_domain() -> DomainModule:
             )
         if collection_count(vpcs) == 0:
             return ctx.results.not_applicable_no_resources(
-                account_id, account_name, region, "LOG-12", evidence, "No resources found"
+                account_id, account_name, region, "LOG-12", evidence
             )
         return ctx.results.audit_result(
             account_id,
