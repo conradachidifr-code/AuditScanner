@@ -508,16 +508,20 @@ def _bck_vault_lock_evidence(ctx: CheckContext, vaults: list[dict[str, Any]]) ->
 
 
 def _bck_org_backup_centralization_evidence(ctx: CheckContext) -> dict[str, Any]:
-    delegated_data = ctx.invoke_aws_cli(["organizations", "list-delegated-administrators"])
+    delegated_data = ctx.invoke_aws_cli(
+        [
+            "organizations",
+            "list-delegated-administrators",
+            "--service-principal",
+            "backup.amazonaws.com",
+        ]
+    )
     backup_policy_data = ctx.invoke_aws_cli(["organizations", "list-policies", "--filter", "BACKUP_POLICY"])
 
     backup_delegated_admins: list[str] = []
     if delegated_data and has_property(delegated_data, "DelegatedAdministrators"):
         for admin in cli_array(property_value(delegated_data, ["DelegatedAdministrators"])):
             if not isinstance(admin, dict):
-                continue
-            service_principal = str(property_value(admin, ["ServicePrincipal"]) or "")
-            if "backup" not in service_principal.lower():
                 continue
             account_id = str(
                 property_value(admin, ["Id"])

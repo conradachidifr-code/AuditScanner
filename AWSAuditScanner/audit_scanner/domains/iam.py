@@ -1990,7 +1990,7 @@ def get_domain() -> DomainModule:
                     recorder_active = True
                     break
         target_rule_names = (
-            "iam-no-inline-policy-check",
+            "iam-no-inline-policy",
             "iam-policy-no-statements-with-admin-access",
             "iam-root-access-key-check",
         )
