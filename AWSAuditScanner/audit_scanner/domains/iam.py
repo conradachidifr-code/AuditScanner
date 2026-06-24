@@ -421,10 +421,10 @@ def _get_iam_credential_report(ctx: CheckContext) -> dict[str, Any] | None:
 
 _IAM_ROLE_SEPARATION_PATTERNS = {
     "admin": re.compile(r"admin|administrator", re.IGNORECASE),
-    "security": re.compile(r"secur|audit|compliance", re.IGNORECASE),
-    "operations": re.compile(r"ops|operat|exploit|deploy", re.IGNORECASE),
-    "network": re.compile(r"network|net-|vpc|tgw", re.IGNORECASE),
-    "readonly": re.compile(r"read|viewer|readonly", re.IGNORECASE),
+    "security": re.compile(r"sec|security|soc|csirt", re.IGNORECASE),
+    "ops": re.compile(r"ops|operation|exploit|devops", re.IGNORECASE),
+    "network": re.compile(r"net|network|netw|infra", re.IGNORECASE),
+    "readonly": re.compile(r"read|viewer|readonly|view", re.IGNORECASE),
 }
 
 _KMS_ADMIN_ACTION_PATTERN = re.compile(
@@ -1438,8 +1438,9 @@ def get_domain() -> DomainModule:
         if data is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "IAM-20")
         providers: list[str] = []
-        roles_with_oidc_audience = 0
-        roles_missing_oidc_audience = 0
+        oidc_role_count = 0
+        roles_with_audience_and_subject = 0
+        roles_missing_conditions = 0
         if has_property(data, "OpenIDConnectProviderList"):
             for provider in cli_array(property_value(data, ["OpenIDConnectProviderList"])):
                 if not isinstance(provider, dict):
@@ -1453,26 +1454,24 @@ def get_domain() -> DomainModule:
                 trust_text = _iam_role_trust_policy_text(ctx, role_name)
                 if not trust_text or "oidc-provider" not in trust_text.lower():
                     continue
-                if re.search(r"aud|sub|token\.actions\.githubusercontent\.com", trust_text, re.IGNORECASE):
-                    roles_with_oidc_audience += 1
+                oidc_role_count += 1
+                has_audience_condition = bool(re.search(r":aud|audience", trust_text, re.IGNORECASE))
+                has_subject_condition = bool(re.search(r":sub|subject", trust_text, re.IGNORECASE))
+                if has_audience_condition and has_subject_condition:
+                    roles_with_audience_and_subject += 1
                 else:
-                    roles_missing_oidc_audience += 1
+                    roles_missing_conditions += 1
         evidence = {
             "oidc_provider_arns": list(providers),
-            "roles_with_oidc_audience": roles_with_oidc_audience,
-            "roles_missing_oidc_audience": roles_missing_oidc_audience,
+            "oidc_role_count": oidc_role_count,
+            "roles_with_audience_and_subject": roles_with_audience_and_subject,
+            "roles_missing_conditions": roles_missing_conditions,
         }
-        if collection_count(providers) > 0 and roles_missing_oidc_audience > 0:
-            return ctx.results.audit_result(
-                account_id,
-                account_name,
-                region,
-                "IAM-20",
-                "FAIL",
-                evidence,
-                "OIDC-trusted roles are missing audience or subject conditions",
-            )
-        if collection_count(providers) > 0 and roles_with_oidc_audience > 0:
+        if (
+            collection_count(providers) > 0
+            and oidc_role_count > 0
+            and roles_with_audience_and_subject == oidc_role_count
+        ):
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -1480,7 +1479,7 @@ def get_domain() -> DomainModule:
                 "IAM-20",
                 "PASS",
                 evidence,
-                "OIDC provider configured with audience or subject conditions on pipeline roles",
+                "OIDC-trusted roles include both audience and subject conditions",
             )
         if collection_count(providers) > 0:
             return ctx.results.audit_result(
@@ -1490,7 +1489,7 @@ def get_domain() -> DomainModule:
                 "IAM-20",
                 "PARTIAL",
                 evidence,
-                "OIDC provider configured but no pipeline roles with audience or subject conditions were found",
+                "OIDC provider present but audience or subject conditions are insufficient",
             )
         return ctx.results.audit_result(
             account_id, account_name, region, "IAM-20", "FAIL", evidence, "No OIDC providers found"
@@ -1991,9 +1990,9 @@ def get_domain() -> DomainModule:
                     recorder_active = True
                     break
         target_rule_names = (
-            "iam-root-access-key-check",
             "iam-no-inline-policy-check",
-            "iam-user-no-policies-check",
+            "iam-policy-no-statements-with-admin-access",
+            "iam-root-access-key-check",
         )
         iam_rules: list[str] = []
         matched_target_rules: list[str] = []

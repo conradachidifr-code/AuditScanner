@@ -231,7 +231,34 @@ def _get_net_igw_route_evidence(ctx: CheckContext) -> dict[str, Any] | None:
     }
 
 
-def _evaluate_net_exposed_api(ctx: CheckContext, api_id: str, api_name: str) -> dict[str, Any]:
+def _net_waf_protected_api_gateway_arns(ctx: CheckContext) -> set[str]:
+    protected_arns: set[str] = set()
+    acl_data = ctx.invoke_aws_cli(["wafv2", "list-web-acls", "--scope", "REGIONAL"])
+    if not acl_data or not _test_net_has_property(acl_data, "WebACLs"):
+        return protected_arns
+    for acl in _get_net_cli_array(acl_data.get("WebACLs")):
+        waf_arn = str(acl.get("ARN", "") or "")
+        if not waf_arn:
+            continue
+        resources_data = ctx.invoke_aws_cli(
+            [
+                "wafv2",
+                "list-resources-for-web-acl",
+                "--web-acl-arn",
+                waf_arn,
+                "--resource-type",
+                "API_GATEWAY",
+            ]
+        )
+        if resources_data and _test_net_has_property(resources_data, "ResourceArns"):
+            for resource_arn in _get_net_cli_array(resources_data.get("ResourceArns")):
+                protected_arns.add(str(resource_arn))
+    return protected_arns
+
+
+def _evaluate_net_exposed_api(
+    ctx: CheckContext, api_id: str, api_name: str, waf_protected_arns: set[str]
+) -> dict[str, Any]:
     resource_data = ctx.invoke_aws_cli(["apigateway", "get-resources", "--rest-api-id", api_id])
     stages_data = ctx.invoke_aws_cli(["apigateway", "get-stages", "--rest-api-id", api_id])
 
@@ -282,8 +309,7 @@ def _evaluate_net_exposed_api(ctx: CheckContext, api_id: str, api_name: str) -> 
                 logged_stages += 1
             if stage_name:
                 stage_arn = f"arn:aws:apigateway:{ctx.aws.region}::/restapis/{api_id}/stages/{stage_name}"
-                waf_data = ctx.invoke_aws_cli(["wafv2", "get-web-acl-for-resource", "--resource-arn", stage_arn])
-                if waf_data is not None and _test_net_has_property(waf_data, "WebACL"):
+                if stage_arn in waf_protected_arns:
                     waf_protected_stages += 1
 
     return {
@@ -298,7 +324,9 @@ def _evaluate_net_exposed_api(ctx: CheckContext, api_id: str, api_name: str) -> 
     }
 
 
-def _evaluate_net_http_api(ctx: CheckContext, api_id: str, api_name: str) -> dict[str, Any]:
+def _evaluate_net_http_api(
+    ctx: CheckContext, api_id: str, api_name: str, waf_protected_arns: set[str]
+) -> dict[str, Any]:
     routes_data = ctx.invoke_aws_cli(["apigatewayv2", "get-routes", "--api-id", api_id])
     unauthenticated_routes = 0
     route_count = 0
@@ -321,11 +349,8 @@ def _evaluate_net_http_api(ctx: CheckContext, api_id: str, api_name: str) -> dic
         if isinstance(access_log_settings, dict) and access_log_settings.get("DestinationArn"):
             logged = True
 
-    waf_protected = False
     stage_arn = f"arn:aws:apigateway:{ctx.aws.region}::/apis/{api_id}/stages/$default"
-    waf_data = ctx.invoke_aws_cli(["wafv2", "get-web-acl-for-resource", "--resource-arn", stage_arn])
-    if waf_data is not None and _test_net_has_property(waf_data, "WebACL"):
-        waf_protected = True
+    waf_protected = stage_arn in waf_protected_arns
 
     return {
         "api_id": api_id,
@@ -337,6 +362,71 @@ def _evaluate_net_http_api(ctx: CheckContext, api_id: str, api_name: str) -> dic
         "logged": logged,
         "waf_protected": waf_protected,
     }
+
+
+def _net_vpc_environment_map(ctx: CheckContext) -> dict[str, str]:
+    vpc_map: dict[str, str] = {}
+    vpcs = _get_net_vpcs(ctx)
+    if not vpcs:
+        return vpc_map
+    for vpc in vpcs:
+        vpc_id = str(vpc.get("VpcId", "") or "")
+        if not vpc_id:
+            continue
+        vpc_name = None
+        environment_tag = None
+        if _test_net_has_property(vpc, "Tags"):
+            vpc_name = _get_net_tag_value_by_key(vpc.get("Tags"), "Name")
+            environment_tag = _get_net_tag_value_by_key(vpc.get("Tags"), "Environment")
+        label = f"{vpc_name or ''} {environment_tag or ''} {vpc_id}"
+        if _test_net_environment_name(label, "prod"):
+            vpc_map[vpc_id] = "prod"
+        elif _test_net_environment_name(label, "nonprod"):
+            vpc_map[vpc_id] = "nonprod"
+    return vpc_map
+
+
+def _net_prod_nonprod_tgw_route_count(ctx: CheckContext) -> tuple[int, bool]:
+    vpc_env = _net_vpc_environment_map(ctx)
+    rtb_data = ctx.invoke_aws_cli(["ec2", "describe-transit-gateway-route-tables"])
+    if rtb_data is None or not _test_net_has_property(rtb_data, "TransitGatewayRouteTables"):
+        return 0, False
+
+    risky_route_count = 0
+    for rtb in _get_net_cli_array(rtb_data.get("TransitGatewayRouteTables")):
+        rtb_id = str(rtb.get("TransitGatewayRouteTableId", "") or "")
+        if not rtb_id:
+            continue
+        search_data = ctx.invoke_aws_cli(
+            [
+                "ec2",
+                "search-transit-gateway-routes",
+                "--transit-gateway-route-table-id",
+                rtb_id,
+                "--filters",
+                "Name=state,Values=active",
+            ]
+        )
+        if not search_data or not _test_net_has_property(search_data, "Routes"):
+            continue
+        for route in _get_net_cli_array(search_data.get("Routes")):
+            attachments = route.get("TransitGatewayAttachments")
+            if not isinstance(attachments, list) or not attachments:
+                continue
+            source_vpc = str(attachments[0].get("ResourceId", "") or "")
+            source_env = vpc_env.get(source_vpc)
+            if not source_env:
+                continue
+            for vpc_id, dest_env in vpc_env.items():
+                if vpc_id == source_vpc:
+                    continue
+                if source_env == "prod" and dest_env == "nonprod":
+                    risky_route_count += 1
+                    break
+                if source_env == "nonprod" and dest_env == "prod":
+                    risky_route_count += 1
+                    break
+    return risky_route_count, True
 
 
 def get_domain() -> DomainModule:
@@ -1356,6 +1446,7 @@ def get_domain() -> DomainModule:
         if rest_data is None and http_data is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "NET-18")
 
+        waf_protected_arns = _net_waf_protected_api_gateway_arns(ctx)
         apis: list[dict[str, Any]] = []
         if rest_data and _test_net_has_property(rest_data, "items"):
             for api in _get_net_cli_array(rest_data.get("items")):
@@ -1365,7 +1456,7 @@ def get_domain() -> DomainModule:
                 if "PRIVATE" in [str(item) for item in endpoint_types]:
                     continue
                 if api_id:
-                    apis.append(_evaluate_net_exposed_api(ctx, api_id, api_name))
+                    apis.append(_evaluate_net_exposed_api(ctx, api_id, api_name, waf_protected_arns))
 
         http_api_summaries: list[dict[str, Any]] = []
         if http_data and _test_net_has_property(http_data, "Items"):
@@ -1373,7 +1464,9 @@ def get_domain() -> DomainModule:
                 api_id = str(api.get("ApiId", "") or "")
                 api_name = str(api.get("Name", "") or "")
                 if api_id:
-                    http_api_summaries.append(_evaluate_net_http_api(ctx, api_id, api_name))
+                    http_api_summaries.append(
+                        _evaluate_net_http_api(ctx, api_id, api_name, waf_protected_arns)
+                    )
 
         if _get_net_collection_count(apis) == 0 and _get_net_collection_count(http_api_summaries) == 0:
             return ctx.results.not_applicable_no_resources(
@@ -1806,23 +1899,14 @@ def get_domain() -> DomainModule:
                 if (requester_prod and accepter_nonprod) or (requester_nonprod and accepter_prod):
                     risky_peerings.append(record)
 
-        tgw_attach_data = ctx.invoke_aws_cli(["ec2", "describe-transit-gateway-attachments"])
-        prod_tgw_attachments = 0
-        nonprod_tgw_attachments = 0
-        if tgw_attach_data and _test_net_has_property(tgw_attach_data, "TransitGatewayAttachments"):
-            for attachment in _get_net_cli_array(tgw_attach_data.get("TransitGatewayAttachments")):
-                resource_id = str(attachment.get("ResourceId", "") or "")
-                if _test_net_environment_name(resource_id, "prod"):
-                    prod_tgw_attachments += 1
-                if _test_net_environment_name(resource_id, "nonprod"):
-                    nonprod_tgw_attachments += 1
+        prod_nonprod_tgw_route_count, tgw_checked = _net_prod_nonprod_tgw_route_count(ctx)
 
         evidence = {
             "active_peering_count": _get_net_collection_count(peerings),
             "peerings": list(peerings),
             "risky_peerings": list(risky_peerings),
-            "prod_tgw_attachment_count": prod_tgw_attachments,
-            "nonprod_tgw_attachment_count": nonprod_tgw_attachments,
+            "prod_nonprod_tgw_route_count": prod_nonprod_tgw_route_count,
+            "tgw_route_tables_checked": tgw_checked,
         }
         if _get_net_collection_count(risky_peerings) > 0:
             return ctx.results.audit_result(
@@ -1834,7 +1918,7 @@ def get_domain() -> DomainModule:
                 evidence,
                 "Direct peering between prod and non-prod environments detected",
             )
-        if prod_tgw_attachments > 0 and nonprod_tgw_attachments > 0:
+        if prod_nonprod_tgw_route_count > 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -1842,9 +1926,9 @@ def get_domain() -> DomainModule:
                 "NET-25",
                 "FAIL",
                 evidence,
-                "Prod and non-prod Transit Gateway attachments detected in the same account",
+                "Active Transit Gateway routes cross prod and non-prod environments",
             )
-        if _get_net_collection_count(peerings) > 0:
+        if tgw_checked or _get_net_collection_count(peerings) > 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -1852,7 +1936,7 @@ def get_domain() -> DomainModule:
                 "NET-25",
                 "PARTIAL",
                 evidence,
-                "Peering exists; verify environment isolation using tags and naming",
+                "Inter-environment connectivity exists; verify TGW route isolation against approved matrix",
             )
         return ctx.results.audit_result(
             account_id, account_name, region, "NET-25", "PASS", evidence, "No active VPC peering connections detected"

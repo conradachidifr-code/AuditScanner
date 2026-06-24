@@ -1292,7 +1292,7 @@ def get_domain() -> DomainModule:
                     "advanced_security_mode": advanced_security,
                 }
             )
-            if mfa_config.lower() == "off" or not password_policy:
+            if mfa_config.lower() == "off" or not password_policy or advanced_security.upper() == "OFF":
                 failing_pools += 1
 
         evidence = {
@@ -1308,7 +1308,7 @@ def get_domain() -> DomainModule:
                 "WRK-26",
                 "FAIL",
                 evidence,
-                "One or more Cognito user pools have MFA disabled",
+                "One or more Cognito user pools have MFA disabled, weak password policy, or advanced security off",
             )
         return ctx.results.audit_result(
             account_id,
@@ -1317,7 +1317,7 @@ def get_domain() -> DomainModule:
             "WRK-26",
             "PASS",
             evidence,
-            "Cognito user pools have MFA enabled",
+            "Cognito user pools have MFA, password policy and advanced security configured",
         )
 
     checks["WRK-26"] = wrk26
