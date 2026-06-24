@@ -309,7 +309,7 @@ def get_domain() -> DomainModule:
 
     checks["NET-01"] = workshop(
         "NET-01",
-        "Verify DAT contains network topology, VPC segmentation, encryption boundaries. Check SIPedia version.",
+        "Verify DAT contains network topology, VPC segmentation, encryption boundaries. Check current architecture documentation.",
     )
 
     def net02(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
@@ -319,20 +319,45 @@ def get_domain() -> DomainModule:
 
         vpc_list = _get_net_cli_array(vpcs)
         vpc_evidence = _new_net_list()
+        prod_vpc_count = 0
+        nonprod_vpc_count = 0
         for vpc in vpc_list:
             vpc_name = None
+            environment_tag = None
             if _test_net_has_property(vpc, "Tags"):
                 vpc_name = _get_net_tag_value_by_key(vpc.get("Tags"), "Name")
+                environment_tag = _get_net_tag_value_by_key(vpc.get("Tags"), "Environment")
+            env_text = f"{vpc_name or ''} {environment_tag or ''}".lower()
+            if re.search(r"prod|production", env_text) and not re.search(r"non-?prod|dev|test|sandbox", env_text):
+                prod_vpc_count += 1
+            if re.search(r"non-?prod|dev|test|sandbox|staging", env_text):
+                nonprod_vpc_count += 1
             vpc_record = {
                 "vpc_id": str(vpc.get("VpcId", "") or ""),
                 "cidr_block": str(vpc.get("CidrBlock", "") or ""),
                 "name": vpc_name,
+                "environment_tag": environment_tag,
             }
             vpc_evidence.append(vpc_record)
 
         vpc_count = _get_net_collection_count(vpc_list)
-        evidence = {"vpc_count": vpc_count, "vpcs": list(vpc_evidence)}
+        evidence = {
+            "vpc_count": vpc_count,
+            "vpcs": list(vpc_evidence),
+            "prod_vpc_count": prod_vpc_count,
+            "nonprod_vpc_count": nonprod_vpc_count,
+        }
 
+        if prod_vpc_count > 0 and nonprod_vpc_count > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "NET-02",
+                "PASS",
+                evidence,
+                "Production and non-production VPCs identified by naming or Environment tags",
+            )
         if vpc_count > 1:
             return ctx.results.audit_result(
                 account_id,
@@ -542,6 +567,17 @@ def get_domain() -> DomainModule:
             nat_gateways = _get_net_cli_array(nat_data.get("NatGateways"))
 
         nat_vpc_ids = _new_net_list()
+        tgw_default_route_count = 0
+        route_tables = _get_net_route_tables(ctx)
+        if route_tables:
+            for route_table in route_tables:
+                if not _test_net_has_property(route_table, "Routes"):
+                    continue
+                for route in _get_net_cli_array(route_table.get("Routes")):
+                    if str(route.get("DestinationCidrBlock", "") or "") == "0.0.0.0/0":
+                        if route.get("TransitGatewayId"):
+                            tgw_default_route_count += 1
+                            break
         for nat in nat_gateways:
             if _test_net_has_property(nat, "VpcId"):
                 nat_vpc_ids.append(str(nat.get("VpcId", "") or ""))
@@ -550,11 +586,22 @@ def get_domain() -> DomainModule:
             "private_vpc_count": len(list(private_vpc_ids.keys())),
             "nat_gateway_count": _get_net_collection_count(nat_gateways),
             "nat_vpc_ids": list(nat_vpc_ids),
+            "tgw_default_route_count": tgw_default_route_count,
         }
 
         if len(list(private_vpc_ids.keys())) == 0:
             return ctx.results.audit_result(
                 account_id, account_name, region, "NET-06", "PARTIAL", evidence, "No private subnets detected"
+            )
+        if tgw_default_route_count > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "NET-06",
+                "PASS",
+                evidence,
+                "Private subnets route egress via Transit Gateway",
             )
         if _get_net_collection_count(nat_gateways) > 0:
             return ctx.results.audit_result(
@@ -590,6 +637,7 @@ def get_domain() -> DomainModule:
             firewall_count = _get_net_collection_count(firewall_data.get("Firewalls"))
 
         unrestricted_egress_count = 0
+        tgw_default_route_count = 0
         if security_groups:
             for sg in security_groups:
                 if not _test_net_has_property(sg, "IpPermissionsEgress"):
@@ -601,9 +649,21 @@ def get_domain() -> DomainModule:
                         unrestricted_egress_count += 1
                         break
 
+        route_tables = _get_net_route_tables(ctx)
+        if route_tables:
+            for route_table in route_tables:
+                if not _test_net_has_property(route_table, "Routes"):
+                    continue
+                for route in _get_net_cli_array(route_table.get("Routes")):
+                    destination = str(route.get("DestinationCidrBlock", "") or "")
+                    if destination == "0.0.0.0/0" and route.get("TransitGatewayId"):
+                        tgw_default_route_count += 1
+                        break
+
         evidence = {
             "firewall_count": firewall_count,
             "unrestricted_egress_sg_count": unrestricted_egress_count,
+            "tgw_default_route_count": tgw_default_route_count,
         }
 
         if firewall_count > 0:
@@ -616,14 +676,24 @@ def get_domain() -> DomainModule:
                 evidence,
                 "Network Firewall deployed for egress filtering",
             )
+        if tgw_default_route_count > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "NET-07",
+                "PARTIAL",
+                evidence,
+                "Default routes use Transit Gateway; verify controlled egress path via proxy or firewall",
+            )
         return ctx.results.audit_result(
             account_id,
             account_name,
             region,
             "NET-07",
-            "PARTIAL",
+            "FAIL",
             evidence,
-            "No Network Firewall detected; verify controlled egress path via proxy, TGW or firewall",
+            "No Network Firewall or Transit Gateway egress path detected",
         )
 
     checks["NET-07"] = net07
@@ -640,6 +710,12 @@ def get_domain() -> DomainModule:
             for rule in _get_net_cli_array(sg.get("IpPermissions")):
                 if not _test_net_permission_open_to_internet(rule):
                     continue
+                ipv6_open = False
+                if _test_net_has_property(rule, "Ipv6Ranges"):
+                    for ipv6_range in _get_net_cli_array(rule.get("Ipv6Ranges")):
+                        if str(ipv6_range.get("CidrIpv6", "") or "") == "::/0":
+                            ipv6_open = True
+                            break
                 from_port = 0
                 to_port = 65535
                 if _test_net_has_property(rule, "FromPort") and rule.get("FromPort") is not None:
@@ -647,8 +723,8 @@ def get_domain() -> DomainModule:
                 if _test_net_has_property(rule, "ToPort") and rule.get("ToPort") is not None:
                     to_port = int(rule.get("ToPort"))
                 all_protocols = _test_net_has_property(rule, "IpProtocol") and str(rule.get("IpProtocol", "") or "") == "-1"
-                allows_ssh = (from_port <= 22 and to_port >= 22) or all_protocols
-                allows_rdp = (from_port <= 3389 and to_port >= 3389) or all_protocols
+                allows_ssh = (from_port <= 22 and to_port >= 22) or all_protocols or ipv6_open
+                allows_rdp = (from_port <= 3389 and to_port >= 3389) or all_protocols or ipv6_open
                 if allows_ssh or allows_rdp:
                     if _get_net_collection_count(offending_groups) < 10:
                         offending_groups.append(str(sg.get("GroupId", "") or ""))
@@ -709,11 +785,24 @@ def get_domain() -> DomainModule:
                 if internet_admin_exposure:
                     break
 
+        session_logging_enabled = False
+        prefs_data = ctx.invoke_aws_cli(["ssm", "get-service-setting", "--SettingId", "arn:aws:ssm:*:*:servicesetting/ssm/session-manager/s3BucketName"])
+        if prefs_data and has_property(prefs_data, "ServiceSetting"):
+            setting_value = str(property_value(property_value(prefs_data, ["ServiceSetting"]), ["SettingValue"]) or "")
+            if setting_value.strip():
+                session_logging_enabled = True
+        ssm_endpoints = 0
+        endpoint_data = ctx.invoke_aws_cli(["ec2", "describe-vpc-endpoints", "--filters", "Name=service-name,Values=com.amazonaws.*.ssm"])
+        if endpoint_data and _test_net_has_property(endpoint_data, "VpcEndpoints"):
+            ssm_endpoints = _get_net_collection_count(endpoint_data.get("VpcEndpoints"))
+
         evidence = {
             "ssm_managed_instance_count": managed_count,
             "internet_admin_exposure": internet_admin_exposure,
+            "session_logging_enabled": session_logging_enabled,
+            "ssm_vpc_endpoint_count": ssm_endpoints,
         }
-        if managed_count > 0 and not internet_admin_exposure:
+        if managed_count > 0 and not internet_admin_exposure and (session_logging_enabled or ssm_endpoints > 0):
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -747,8 +836,7 @@ def get_domain() -> DomainModule:
             if not _test_net_has_property(sg, "IpPermissions"):
                 continue
             for rule in _get_net_cli_array(sg.get("IpPermissions")):
-                all_protocols = _test_net_has_property(rule, "IpProtocol") and str(rule.get("IpProtocol", "") or "") == "-1"
-                if _test_net_permission_open_to_internet(rule) and all_protocols:
+                if _test_net_permission_open_to_internet(rule):
                     if _get_net_collection_count(open_groups) < 10:
                         open_groups.append(str(sg.get("GroupId", "") or ""))
                     break
@@ -765,7 +853,7 @@ def get_domain() -> DomainModule:
                 "NET-10",
                 "FAIL",
                 evidence,
-                "Security groups allow all traffic from the internet",
+                "Security groups allow inbound traffic from the internet (0.0.0.0/0)",
             )
         return ctx.results.audit_result(
             account_id,
@@ -789,16 +877,44 @@ def get_domain() -> DomainModule:
             acls = _get_net_cli_array(data.get("NetworkAcls"))
 
         custom_acl_count = 0
+        permissive_custom_acls: list[str] = []
         for acl in acls:
             if acl.get("IsDefault") is True:
                 continue
             custom_acl_count += 1
+            acl_id = str(acl.get("NetworkAclId", "") or "")
+            if not _test_net_has_property(acl, "Entries"):
+                continue
+            for entry in _get_net_cli_array(acl.get("Entries")):
+                if str(entry.get("RuleAction", "") or "") != "allow":
+                    continue
+                if str(entry.get("Egress", "") or "").lower() == "true":
+                    continue
+                cidr = str(entry.get("CidrBlock", "") or "")
+                protocol = str(entry.get("Protocol", "") or "")
+                port_from = entry.get("PortRange", {}).get("From") if isinstance(entry.get("PortRange"), dict) else None
+                port_to = entry.get("PortRange", {}).get("To") if isinstance(entry.get("PortRange"), dict) else None
+                if cidr == "0.0.0.0/0" and protocol == "-1":
+                    if acl_id and acl_id not in permissive_custom_acls:
+                        permissive_custom_acls.append(acl_id)
+                    break
 
         evidence = {
             "nacl_count": _get_net_collection_count(acls),
             "custom_nacl_count": custom_acl_count,
             "default_nacl_count": (_get_net_collection_count(acls) - custom_acl_count),
+            "permissive_custom_acls": list(permissive_custom_acls),
         }
+        if _get_net_collection_count(permissive_custom_acls) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "NET-11",
+                "FAIL",
+                evidence,
+                "Custom NACLs allow all inbound traffic from the internet",
+            )
         if custom_acl_count > 0:
             return ctx.results.audit_result(
                 account_id,
@@ -807,7 +923,7 @@ def get_domain() -> DomainModule:
                 "NET-11",
                 "PASS",
                 evidence,
-                "Custom NACLs exist beyond default allow-all",
+                "Custom NACLs exist without permissive allow-all rules",
             )
         return ctx.results.audit_result(
             account_id, account_name, region, "NET-11", "FAIL", evidence, "Only default NACLs detected"
@@ -865,6 +981,35 @@ def get_domain() -> DomainModule:
                 }
                 attachments.append(attachment_record)
 
+        route_table_ids: list[str] = []
+        rtb_data = ctx.invoke_aws_cli(["ec2", "describe-transit-gateway-route-tables"])
+        if rtb_data and _test_net_has_property(rtb_data, "TransitGatewayRouteTables"):
+            for rtb in _get_net_cli_array(rtb_data.get("TransitGatewayRouteTables")):
+                rtb_id = str(rtb.get("TransitGatewayRouteTableId", "") or "")
+                if rtb_id:
+                    route_table_ids.append(rtb_id)
+
+        propagation_count = 0
+        active_route_count = 0
+        for rtb_id in route_table_ids:
+            prop_data = ctx.invoke_aws_cli(
+                ["ec2", "describe-transit-gateway-route-table-propagations", "--transit-gateway-route-table-id", rtb_id]
+            )
+            if prop_data and _test_net_has_property(prop_data, "TransitGatewayRouteTablePropagations"):
+                propagation_count += _get_net_collection_count(prop_data.get("TransitGatewayRouteTablePropagations"))
+            search_data = ctx.invoke_aws_cli(
+                [
+                    "ec2",
+                    "search-transit-gateway-routes",
+                    "--transit-gateway-route-table-id",
+                    rtb_id,
+                    "--filters",
+                    "Name=state,Values=active",
+                ]
+            )
+            if search_data and _test_net_has_property(search_data, "Routes"):
+                active_route_count += _get_net_collection_count(search_data.get("Routes"))
+
         return ctx.results.audit_result(
             account_id,
             account_name,
@@ -875,8 +1020,11 @@ def get_domain() -> DomainModule:
                 "tgw_ids": list(tgw_ids),
                 "attachment_count": _get_net_collection_count(attachments),
                 "attachments": list(attachments),
+                "tgw_route_table_count": _get_net_collection_count(route_table_ids),
+                "propagation_count": propagation_count,
+                "active_route_count": active_route_count,
             },
-            "Review TGW attachments for justification and least connectivity",
+            "Review TGW attachments, route tables and propagation for least connectivity",
         )
 
     checks["NET-13"] = net13
@@ -901,8 +1049,14 @@ def get_domain() -> DomainModule:
                             found_services.append(required)
 
         endpoint_count = 0
+        open_policy_endpoints: list[str] = []
         if _test_net_has_property(data, "VpcEndpoints"):
             endpoint_count = _get_net_collection_count(data.get("VpcEndpoints"))
+            for endpoint in _get_net_cli_array(data.get("VpcEndpoints")):
+                endpoint_id = str(endpoint.get("VpcEndpointId", "") or "")
+                policy_doc = str(endpoint.get("PolicyDocument", "") or "")
+                if policy_doc and re.search(r'"Principal"\s*:\s*"\*"', policy_doc):
+                    open_policy_endpoints.append(endpoint_id)
 
         for required in required_services:
             if required not in found_services:
@@ -913,8 +1067,19 @@ def get_domain() -> DomainModule:
             "service_names": list(service_names),
             "required_found": list(found_services),
             "required_missing": list(required_missing),
+            "open_policy_endpoints": list(open_policy_endpoints),
         }
 
+        if _get_net_collection_count(open_policy_endpoints) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "NET-14",
+                "FAIL",
+                evidence,
+                "One or more VPC endpoints have wide-open Principal:* policies",
+            )
         if _get_net_collection_count(found_services) == _get_net_collection_count(required_services):
             return ctx.results.audit_result(
                 account_id, account_name, region, "NET-14", "PASS", evidence, "Required private endpoints are present"
@@ -950,10 +1115,63 @@ def get_domain() -> DomainModule:
                 }
                 endpoints.append(endpoint_record)
 
-        evidence = {"resolver_endpoint_count": _get_net_collection_count(endpoints), "endpoints": list(endpoints)}
+        query_log_configs: list[dict[str, Any]] = []
+        query_log_data = ctx.invoke_aws_cli(["route53resolver", "list-resolver-query-log-configs"])
+        if query_log_data and _test_net_has_property(query_log_data, "ResolverQueryLogConfigs"):
+            for config in _get_net_cli_array(query_log_data.get("ResolverQueryLogConfigs")):
+                query_log_configs.append(
+                    {
+                        "name": str(config.get("Name", "") or ""),
+                        "destination_arn": str(config.get("DestinationArn", "") or ""),
+                        "status": str(config.get("Status", "") or ""),
+                    }
+                )
+
+        forward_rules: list[dict[str, Any]] = []
+        rules_data = ctx.invoke_aws_cli(["route53resolver", "list-resolver-rules"])
+        if rules_data and _test_net_has_property(rules_data, "ResolverRules"):
+            for rule in _get_net_cli_array(rules_data.get("ResolverRules")):
+                if str(rule.get("RuleType", "") or "") != "FORWARD":
+                    continue
+                forward_rules.append(
+                    {
+                        "domain": str(rule.get("DomainName", "") or ""),
+                        "rule_id": str(rule.get("Id", "") or ""),
+                    }
+                )
+
+        evidence = {
+            "resolver_endpoint_count": _get_net_collection_count(endpoints),
+            "endpoints": list(endpoints),
+            "query_log_config_count": _get_net_collection_count(query_log_configs),
+            "query_log_configs": list(query_log_configs),
+            "forward_rule_count": _get_net_collection_count(forward_rules),
+            "forward_rules": list(forward_rules),
+        }
+        active_query_logs = sum(
+            1
+            for config in query_log_configs
+            if config.get("status") == "CREATED" and config.get("destination_arn")
+        )
+        if _get_net_collection_count(endpoints) > 0 and active_query_logs > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "NET-15",
+                "PASS",
+                evidence,
+                "Route53 resolver endpoints and DNS query logging configured",
+            )
         if _get_net_collection_count(endpoints) > 0:
             return ctx.results.audit_result(
-                account_id, account_name, region, "NET-15", "PASS", evidence, "Route53 resolver endpoints configured"
+                account_id,
+                account_name,
+                region,
+                "NET-15",
+                "PARTIAL",
+                evidence,
+                "Resolver endpoints exist but DNS query logging is not fully configured",
             )
         return ctx.results.audit_result(
             account_id, account_name, region, "NET-15", "FAIL", evidence, "No Route53 resolver endpoints configured"
@@ -1019,11 +1237,24 @@ def get_domain() -> DomainModule:
             listener_data = ctx.invoke_aws_cli(["elbv2", "describe-listeners", "--load-balancer-arn", lb_arn])
             has_https = False
             http_without_redirect = False
+            weak_ssl_policy = False
+            access_logging_enabled = False
+
+            attr_data = ctx.invoke_aws_cli(["elbv2", "describe-load-balancer-attributes", "--load-balancer-arn", lb_arn])
+            if attr_data and _test_net_has_property(attr_data, "Attributes"):
+                for attr in _get_net_cli_array(attr_data.get("Attributes")):
+                    key = str(attr.get("Key", "") or "")
+                    value = str(attr.get("Value", "") or "")
+                    if key == "access_logs.s3.enabled" and value.lower() == "true":
+                        access_logging_enabled = True
 
             if listener_data and _test_net_has_property(listener_data, "Listeners"):
                 for listener in _get_net_cli_array(listener_data.get("Listeners")):
                     if str(listener.get("Protocol", "") or "") == "HTTPS":
                         has_https = True
+                        ssl_policy = str(listener.get("SslPolicy", "") or "")
+                        if not ssl_policy or "2016-08" in ssl_policy or "TLS-1-0" in ssl_policy or "TLS-1-1" in ssl_policy:
+                            weak_ssl_policy = True
                     if str(listener.get("Protocol", "") or "") == "HTTP":
                         has_redirect = False
                         if _test_net_has_property(listener, "DefaultActions"):
@@ -1036,7 +1267,7 @@ def get_domain() -> DomainModule:
             waf_data = ctx.invoke_aws_cli(["wafv2", "get-web-acl-for-resource", "--resource-arn", lb_arn])
             has_waf = waf_data is not None and _test_net_has_property(waf_data, "WebACL")
 
-            if has_https and has_waf and not http_without_redirect:
+            if has_https and has_waf and not http_without_redirect and not weak_ssl_policy and access_logging_enabled:
                 passing_albs.append({"name": lb_name, "scheme": str(lb.get("Scheme", "") or "")})
             else:
                 failing_albs.append(
@@ -1046,6 +1277,8 @@ def get_domain() -> DomainModule:
                         "https": has_https,
                         "waf": has_waf,
                         "http_without_redirect": http_without_redirect,
+                        "weak_ssl_policy": weak_ssl_policy,
+                        "access_logging_enabled": access_logging_enabled,
                     }
                 )
 
@@ -1170,16 +1403,51 @@ def get_domain() -> DomainModule:
             return ctx.results.null_api_partial(account_id, account_name, region, "NET-19")
 
         subscription_arn = None
+        proactive_engagement = None
         subscription = data.get("Subscription") if isinstance(data, dict) else None
         if subscription and isinstance(subscription, dict):
             sub_arn = subscription.get("SubscriptionArn")
             if sub_arn:
                 subscription_arn = str(sub_arn)
+            proactive_engagement = str(subscription.get("ProactiveEngagementStatus", "") or "")
 
-        evidence = {"subscription_arn": subscription_arn, "checked_region": "us-east-1"}
+        protections: list[dict[str, str]] = []
+        protections_data = _invoke_aws_cli_in_region(ctx, ["shield", "list-protections"], "us-east-1")
+        if protections_data and _test_net_has_property(protections_data, "Protections"):
+            for protection in _get_net_cli_array(protections_data.get("Protections")):
+                protections.append(
+                    {
+                        "name": str(protection.get("Name", "") or ""),
+                        "resource_arn": str(protection.get("ResourceArn", "") or ""),
+                    }
+                )
+
+        evidence = {
+            "subscription_arn": subscription_arn,
+            "proactive_engagement_status": proactive_engagement,
+            "protection_count": _get_net_collection_count(protections),
+            "protections": list(protections[:10]),
+            "checked_region": "us-east-1",
+        }
+        if subscription_arn and _get_net_collection_count(protections) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "NET-19",
+                "PASS",
+                evidence,
+                "Shield Advanced subscription active with resource protections",
+            )
         if subscription_arn:
             return ctx.results.audit_result(
-                account_id, account_name, region, "NET-19", "PASS", evidence, "Shield Advanced subscription active"
+                account_id,
+                account_name,
+                region,
+                "NET-19",
+                "PARTIAL",
+                evidence,
+                "Shield Advanced subscribed but no resource protections detected",
             )
         return ctx.results.audit_result(
             account_id, account_name, region, "NET-19", "FAIL", evidence, "Shield Advanced not subscribed"
@@ -1222,11 +1490,13 @@ def get_domain() -> DomainModule:
 
     def net21(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
         data = ctx.invoke_aws_cli(["ram", "list-resources", "--resource-owner", "SELF"])
-        if data is None:
+        shares_data = ctx.invoke_aws_cli(["ram", "list-resource-shares", "--resource-owner", "SELF"])
+        principals_data = ctx.invoke_aws_cli(["ram", "list-principals", "--resource-owner", "SELF"])
+        if data is None and shares_data is None and principals_data is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "NET-21")
 
         resources = _new_net_list()
-        if _test_net_has_property(data, "Resources"):
+        if data and _test_net_has_property(data, "Resources"):
             for resource in _get_net_cli_array(data.get("Resources")):
                 resource_record = {
                     "arn": str(_get_net_property_value(resource, ["arn", "Arn"]) or ""),
@@ -1235,14 +1505,63 @@ def get_domain() -> DomainModule:
                 }
                 resources.append(resource_record)
 
+        resource_shares: list[dict[str, str]] = []
+        if shares_data and _test_net_has_property(shares_data, "resourceShares"):
+            for share in _get_net_cli_array(shares_data.get("resourceShares")):
+                resource_shares.append(
+                    {
+                        "name": str(share.get("name", "") or ""),
+                        "arn": str(share.get("resourceShareArn", "") or ""),
+                        "status": str(share.get("status", "") or ""),
+                    }
+                )
+
+        principals: list[dict[str, str]] = []
+        external_principals: list[str] = []
+        if principals_data and _test_net_has_property(principals_data, "principals"):
+            for principal in _get_net_cli_array(principals_data.get("principals")):
+                principal_id = str(principal.get("id", "") or "")
+                principal_type = str(principal.get("type", "") or "")
+                share_arn = str(principal.get("resourceShareArn", "") or "")
+                principals.append({"principal": principal_id, "type": principal_type, "share_arn": share_arn})
+                if principal_type.upper() == "EXTERNAL" and principal_id:
+                    external_principals.append(principal_id)
+
+        evidence = {
+            "shared_resource_count": _get_net_collection_count(resources),
+            "resources": list(resources),
+            "resource_share_count": _get_net_collection_count(resource_shares),
+            "principal_count": _get_net_collection_count(principals),
+            "external_principals": list(external_principals),
+        }
+        if _get_net_collection_count(external_principals) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "NET-21",
+                "FAIL",
+                evidence,
+                "RAM resource shares include external principals outside the organization",
+            )
+        if _get_net_collection_count(resources) > 0 or _get_net_collection_count(resource_shares) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "NET-21",
+                "PARTIAL",
+                evidence,
+                "Review AWS RAM shared network resources and principal assignments",
+            )
         return ctx.results.audit_result(
             account_id,
             account_name,
             region,
             "NET-21",
-            "PARTIAL",
-            {"shared_resource_count": _get_net_collection_count(resources), "resources": list(resources)},
-            "Review AWS RAM shared network resources for authorization",
+            "PASS",
+            evidence,
+            "No RAM shared network resources detected",
         )
 
     checks["NET-21"] = net21
@@ -1250,41 +1569,95 @@ def get_domain() -> DomainModule:
     def net22(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
         dx_data = ctx.invoke_aws_cli(["directconnect", "describe-connections"])
         vpn_data = ctx.invoke_aws_cli(["ec2", "describe-vpn-connections"])
+        vif_data = ctx.invoke_aws_cli(["directconnect", "describe-virtual-interfaces"])
 
         if dx_data is None and vpn_data is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "NET-22")
 
         dx_connections = _new_net_list()
+        active_dx_count = 0
         if dx_data and _test_net_has_property(dx_data, "connections"):
             for connection in _get_net_cli_array(dx_data.get("connections")):
+                state = str(connection.get("connectionState", "") or "")
+                if state.lower() == "available":
+                    active_dx_count += 1
                 dx_connections.append(
                     {
                         "id": str(connection.get("connectionId", "") or ""),
-                        "state": str(connection.get("connectionState", "") or ""),
+                        "state": state,
                         "location": str(connection.get("location", "") or ""),
                     }
                 )
 
         vpn_connections = _new_net_list()
+        weak_vpn_tunnels = 0
         if vpn_data and _test_net_has_property(vpn_data, "VpnConnections"):
             for vpn in _get_net_cli_array(vpn_data.get("VpnConnections")):
+                tunnel_options = vpn.get("Options", {}).get("TunnelOptions", []) if isinstance(vpn.get("Options"), dict) else []
+                for tunnel in _get_net_cli_array(tunnel_options):
+                    phase1 = _get_net_cli_array(tunnel.get("Phase1EncryptionAlgorithms", []))
+                    phase1_values = [str(item.get("Value", "") or "") for item in phase1 if isinstance(item, dict)]
+                    if phase1_values and not any("AES-256" in value for value in phase1_values):
+                        weak_vpn_tunnels += 1
                 vpn_connections.append(
                     {"id": str(vpn.get("VpnConnectionId", "") or ""), "state": str(vpn.get("State", "") or "")}
                 )
 
-        return ctx.results.audit_result(
-            account_id,
-            account_name,
-            region,
-            "NET-22",
-            "PARTIAL",
-            {
-                "direct_connect_count": _get_net_collection_count(dx_connections),
-                "vpn_connection_count": _get_net_collection_count(vpn_connections),
-                "direct_connects": list(dx_connections),
-                "vpn_connections": list(vpn_connections),
-            },
-            "Review VPN and Direct Connect security configuration manually",
+        bgp_down_count = 0
+        virtual_interfaces: list[dict[str, str]] = []
+        if vif_data and _test_net_has_property(vif_data, "virtualInterfaces"):
+            for vif in _get_net_cli_array(vif_data.get("virtualInterfaces")):
+                vif_state = str(vif.get("virtualInterfaceState", "") or "")
+                bgp_peers = _get_net_cli_array(vif.get("bgpPeers", []))
+                for peer in bgp_peers:
+                    if str(peer.get("bgpStatus", "") or "").lower() == "down" and vif_state.lower() == "available":
+                        bgp_down_count += 1
+                virtual_interfaces.append(
+                    {"vif_id": str(vif.get("virtualInterfaceId", "") or ""), "state": vif_state}
+                )
+
+        evidence = {
+            "direct_connect_count": _get_net_collection_count(dx_connections),
+            "active_direct_connect_count": active_dx_count,
+            "vpn_connection_count": _get_net_collection_count(vpn_connections),
+            "weak_vpn_tunnel_count": weak_vpn_tunnels,
+            "bgp_down_count": bgp_down_count,
+            "direct_connects": list(dx_connections),
+            "vpn_connections": list(vpn_connections),
+            "virtual_interfaces": list(virtual_interfaces),
+        }
+        if active_dx_count == 1:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "NET-22",
+                "PARTIAL",
+                evidence,
+                "Single active Direct Connect without geographic redundancy",
+            )
+        if weak_vpn_tunnels > 0 or bgp_down_count > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "NET-22",
+                "FAIL",
+                evidence,
+                "VPN encryption or BGP supervision issues detected",
+            )
+        if _get_net_collection_count(dx_connections) > 0 or _get_net_collection_count(vpn_connections) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "NET-22",
+                "PARTIAL",
+                evidence,
+                "Review VPN and Direct Connect security configuration manually",
+            )
+        return ctx.results.not_applicable_no_resources(
+            account_id, account_name, region, "NET-22", evidence
         )
 
     checks["NET-22"] = net22
@@ -1395,10 +1768,23 @@ def get_domain() -> DomainModule:
                 if (requester_prod and accepter_nonprod) or (requester_nonprod and accepter_prod):
                     risky_peerings.append(record)
 
+        tgw_attach_data = ctx.invoke_aws_cli(["ec2", "describe-transit-gateway-attachments"])
+        prod_tgw_attachments = 0
+        nonprod_tgw_attachments = 0
+        if tgw_attach_data and _test_net_has_property(tgw_attach_data, "TransitGatewayAttachments"):
+            for attachment in _get_net_cli_array(tgw_attach_data.get("TransitGatewayAttachments")):
+                resource_id = str(attachment.get("ResourceId", "") or "")
+                if _test_net_environment_name(resource_id, "prod"):
+                    prod_tgw_attachments += 1
+                if _test_net_environment_name(resource_id, "nonprod"):
+                    nonprod_tgw_attachments += 1
+
         evidence = {
             "active_peering_count": _get_net_collection_count(peerings),
             "peerings": list(peerings),
             "risky_peerings": list(risky_peerings),
+            "prod_tgw_attachment_count": prod_tgw_attachments,
+            "nonprod_tgw_attachment_count": nonprod_tgw_attachments,
         }
         if _get_net_collection_count(risky_peerings) > 0:
             return ctx.results.audit_result(
@@ -1472,6 +1858,16 @@ def get_domain() -> DomainModule:
             if flow_log.get("destination") in ("s3", "cloud-watch-logs"):
                 valid_destinations += 1
 
+        flow_log_groups_without_retention = 0
+        logs_data = ctx.invoke_aws_cli(["logs", "describe-log-groups"])
+        if logs_data and _test_net_has_property(logs_data, "logGroups"):
+            for log_group in _get_net_cli_array(logs_data.get("logGroups")):
+                name = str(log_group.get("logGroupName", "") or "").lower()
+                if "flow" not in name and "vpc" not in name:
+                    continue
+                if not _test_net_has_property(log_group, "retentionInDays"):
+                    flow_log_groups_without_retention += 1
+
         evidence = {
             "flow_log_count": _get_net_collection_count(flow_logs),
             "active_flow_log_count": active_count,
@@ -1479,9 +1875,10 @@ def get_domain() -> DomainModule:
             "vpc_count": _get_net_collection_count(vpcs),
             "vpcs_without_flow_logs": vpcs_without_flow_logs,
             "vpc_coverage": list(vpc_coverage),
+            "flow_log_groups_without_retention": flow_log_groups_without_retention,
             "flow_logs": list(flow_logs),
         }
-        if valid_destinations > 0 and vpcs_without_flow_logs == 0:
+        if valid_destinations > 0 and vpcs_without_flow_logs == 0 and flow_log_groups_without_retention == 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,

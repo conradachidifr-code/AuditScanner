@@ -12,6 +12,7 @@ from audit_scanner.helpers import cli_array, collection_count, has_property, pro
 from audit_scanner.results import AuditResult
 
 SEVERITY = {
+    "WRK-01": "P0",
     "WRK-02": "P0",
     "WRK-03": "P0",
     "WRK-04": "P0",
@@ -39,7 +40,21 @@ SEVERITY = {
     "WRK-26": "P0",
 }
 
-WRK_EOL_RUNTIMES = {"nodejs12.x", "nodejs10.x", "nodejs8.10", "python2.7", "ruby2.5"}
+WRK_EOL_RUNTIMES = {
+    "nodejs8.10",
+    "nodejs10.x",
+    "nodejs12.x",
+    "nodejs14.x",
+    "python2.7",
+    "python3.7",
+    "python3.8",
+    "ruby2.5",
+    "ruby2.7",
+    "java8",
+    "go1.x",
+    "dotnetcore2.1",
+    "dotnetcore3.1",
+}
 
 
 def _wrk_tagged_resource_summary(ctx: CheckContext) -> dict[str, Any] | None:
@@ -173,6 +188,10 @@ def get_domain() -> DomainModule:
 
         return _check
 
+    checks["WRK-01"] = workshop(
+        "WRK-01",
+        "Verify a workload baseline policy defines authorized managed services, minimum security requirements and responsibilities per service.",
+    )
     checks["WRK-02"] = workshop(
         "WRK-02", "Verify workload resource inventory completeness and tagging coverage."
     )
@@ -197,7 +216,17 @@ def get_domain() -> DomainModule:
             "ssm_string_parameter_count": string_count,
             "active_access_key_count": key_count,
         }
-        if string_count > 0 or key_count > 0:
+        if string_count > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "WRK-04",
+                "PARTIAL",
+                evidence,
+                "SSM String parameters exist; verify they do not contain secrets during workshop",
+            )
+        if key_count > 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -205,7 +234,7 @@ def get_domain() -> DomainModule:
                 "WRK-04",
                 "FAIL",
                 evidence,
-                "String SSM parameters or service account access keys exist",
+                "Active service account access keys exist",
             )
         return ctx.results.audit_result(
             account_id,
@@ -252,13 +281,32 @@ def get_domain() -> DomainModule:
                 if not vpc_options or not has_property(vpc_options, "SubnetIds"):
                     open_search_public_count += 1
 
+        unauthenticated_function_url_count = 0
+        lambda_data = ctx.invoke_aws_cli(["lambda", "list-functions", "--max-items", "1000"])
+        if lambda_data and has_property(lambda_data, "Functions"):
+            for function in cli_array(property_value(lambda_data, ["Functions"])):
+                if not isinstance(function, dict):
+                    continue
+                function_name = str(property_value(function, ["FunctionName"]) or "")
+                if not function_name:
+                    continue
+                url_data = ctx.invoke_aws_cli(
+                    ["lambda", "get-function-url-config", "--function-name", function_name]
+                )
+                if url_data is None:
+                    continue
+                auth_type = str(property_value(url_data, ["AuthType"]) or "")
+                if auth_type.upper() == "NONE":
+                    unauthenticated_function_url_count += 1
+
         evidence = {
             "public_rds_count": public_db_count,
             "private_rds_count": private_db_count,
             "public_rds_instances": public_dbs,
             "public_opensearch_count": open_search_public_count,
+            "unauthenticated_function_url_count": unauthenticated_function_url_count,
         }
-        if public_db_count > 0 or open_search_public_count > 0:
+        if public_db_count > 0 or open_search_public_count > 0 or unauthenticated_function_url_count > 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -266,7 +314,7 @@ def get_domain() -> DomainModule:
                 "WRK-05",
                 "FAIL",
                 evidence,
-                "Publicly accessible managed data services found",
+                "Publicly accessible managed data services or unauthenticated Lambda function URLs found",
             )
         return ctx.results.audit_result(
             account_id,
@@ -362,20 +410,25 @@ def get_domain() -> DomainModule:
             all_alarms = cli_array(data.get("MetricAlarms"))
 
         matching_alarms: list[str] = []
+        alarms_without_actions: list[str] = []
         for alarm in all_alarms:
             alarm_name = str(property_value(alarm, ["AlarmName"]) or "")
             metric_name = str(property_value(alarm, ["MetricName"]) or "")
             namespace = str(property_value(alarm, ["Namespace"]) or "")
             combined = f"{alarm_name} {metric_name} {namespace}"
+            alarm_actions = cli_array(property_value(alarm, ["AlarmActions"]))
             if re.search(r"Error|Errors|Failed|Failure|Lambda|ECS|EKS", combined, re.IGNORECASE):
                 if collection_count(matching_alarms) < 10:
                     matching_alarms.append(alarm_name)
+                if collection_count(alarm_actions) == 0 and collection_count(alarms_without_actions) < 10:
+                    alarms_without_actions.append(alarm_name)
 
         evidence = {
             "alarm_count": collection_count(all_alarms),
             "matching_alarms": matching_alarms,
+            "alarms_without_actions": alarms_without_actions,
         }
-        if collection_count(matching_alarms) > 0:
+        if collection_count(matching_alarms) > 0 and collection_count(alarms_without_actions) == 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -383,7 +436,17 @@ def get_domain() -> DomainModule:
                 "WRK-09",
                 "PASS",
                 evidence,
-                "CloudWatch alarms exist for workload error monitoring",
+                "CloudWatch alarms exist for workload error monitoring with actions configured",
+            )
+        if collection_count(matching_alarms) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "WRK-09",
+                "PARTIAL",
+                evidence,
+                "Workload error alarms exist but some have no AlarmActions configured",
             )
         return ctx.results.audit_result(
             account_id,
@@ -568,8 +631,25 @@ def get_domain() -> DomainModule:
         scan_on_push = False
         if registry_data:
             scanning_configuration = property_value(registry_data, ["scanningConfiguration"])
-            if scanning_configuration and property_value(scanning_configuration, ["scanOnPush"]) is True:
-                scan_on_push = True
+            if scanning_configuration:
+                rules = cli_array(property_value(scanning_configuration, ["rules"]))
+                for rule in rules:
+                    if not isinstance(rule, dict):
+                        continue
+                    if str(property_value(rule, ["scanFrequency"]) or "") == "SCAN_ON_PUSH":
+                        scan_on_push = True
+                        break
+        if not scan_on_push:
+            scan_config_data = ctx.invoke_aws_cli(["ecr", "get-registry-scanning-configuration"])
+            if scan_config_data and has_property(scan_config_data, "scanningConfiguration"):
+                scanning_configuration = property_value(scan_config_data, ["scanningConfiguration"])
+                rules = cli_array(property_value(scanning_configuration, ["rules"]))
+                for rule in rules:
+                    if not isinstance(rule, dict):
+                        continue
+                    if str(property_value(rule, ["scanFrequency"]) or "") == "SCAN_ON_PUSH":
+                        scan_on_push = True
+                        break
 
         evidence = {
             "repository_count": repo_count,
@@ -881,7 +961,8 @@ def get_domain() -> DomainModule:
     checks["WRK-22"] = wrk22
 
     def wrk23(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
-        encrypted_queues = 0
+        sqs_kms_queues = 0
+        sqs_managed_sse_queues = 0
         unencrypted_queues = 0
         encrypted_topics = 0
         unencrypted_topics = 0
@@ -900,17 +981,16 @@ def get_domain() -> DomainModule:
                         "SqsManagedSseEnabled",
                     ]
                 )
-                encrypted = False
                 attributes = property_value(attr_data, ["Attributes"]) if attr_data else None
                 if attributes:
                     kms_master_key_id = str(property_value(attributes, ["KmsMasterKeyId"]) or "")
                     sqs_managed_sse = str(property_value(attributes, ["SqsManagedSseEnabled"]) or "")
                     if kms_master_key_id:
-                        encrypted = True
-                    if sqs_managed_sse.lower() == "true":
-                        encrypted = True
-                if encrypted:
-                    encrypted_queues += 1
+                        sqs_kms_queues += 1
+                    elif sqs_managed_sse.lower() == "true":
+                        sqs_managed_sse_queues += 1
+                    else:
+                        unencrypted_queues += 1
                 else:
                     unencrypted_queues += 1
 
@@ -933,13 +1013,16 @@ def get_domain() -> DomainModule:
         if sqs_data is None and sns_data is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "WRK-23")
 
-        total_queues = encrypted_queues + unencrypted_queues
+        total_queues = sqs_kms_queues + sqs_managed_sse_queues + unencrypted_queues
         total_topics = encrypted_topics + unencrypted_topics
         evidence = {
             "queue_count": total_queues,
-            "encrypted_queue_count": encrypted_queues,
+            "sqs_kms_queue_count": sqs_kms_queues,
+            "sqs_managed_sse_queue_count": sqs_managed_sse_queues,
+            "unencrypted_queue_count": unencrypted_queues,
             "topic_count": total_topics,
             "encrypted_topic_count": encrypted_topics,
+            "unencrypted_topic_count": unencrypted_topics,
         }
         if total_queues == 0 and total_topics == 0:
             return ctx.results.not_applicable_no_resources(
@@ -949,43 +1032,71 @@ def get_domain() -> DomainModule:
                 "WRK-23",
                 evidence,
             )
-        if unencrypted_queues == 0 and unencrypted_topics == 0:
+        if unencrypted_queues > 0 or unencrypted_topics > 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
                 region,
                 "WRK-23",
-                "PASS",
+                "FAIL",
                 evidence,
-                "All queues and topics are encrypted",
+                "One or more queues or topics are not encrypted",
+            )
+        if sqs_managed_sse_queues > 0 and sqs_kms_queues == 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "WRK-23",
+                "PARTIAL",
+                evidence,
+                "Messaging uses SSE-SQS managed encryption; verify CMK policy if required",
             )
         return ctx.results.audit_result(
             account_id,
             account_name,
             region,
             "WRK-23",
-            "FAIL",
+            "PASS",
             evidence,
-            "One or more queues or topics are not encrypted",
+            "All queues and topics use customer-managed or SSE-KMS encryption",
         )
 
     checks["WRK-23"] = wrk23
 
     def wrk24(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
         api_data = ctx.invoke_aws_cli(["apigateway", "get-rest-apis"])
-        if api_data is None:
+        http_api_data = ctx.invoke_aws_cli(["apigatewayv2", "get-apis"])
+        if api_data is None and http_api_data is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "WRK-24")
 
         apis: list[dict[str, Any]] = []
-        if has_property(api_data, "items"):
+        if api_data and has_property(api_data, "items"):
             apis = cli_array(api_data.get("items"))
-        if collection_count(apis) == 0:
+
+        http_unauthenticated_routes = 0
+        http_route_count = 0
+        if http_api_data and has_property(http_api_data, "Items"):
+            for http_api in cli_array(http_api_data.get("Items")):
+                api_id = str(property_value(http_api, ["ApiId"]) or "")
+                if not api_id:
+                    continue
+                routes_data = ctx.invoke_aws_cli(["apigatewayv2", "get-routes", "--api-id", api_id])
+                if routes_data is None or not has_property(routes_data, "Items"):
+                    continue
+                for route in cli_array(routes_data.get("Items")):
+                    http_route_count += 1
+                    auth_type = str(property_value(route, ["AuthorizationType"]) or "")
+                    if auth_type.upper() == "NONE":
+                        http_unauthenticated_routes += 1
+
+        if collection_count(apis) == 0 and http_route_count == 0:
             return ctx.results.not_applicable_no_resources(
                 account_id,
                 account_name,
                 region,
                 "WRK-24",
-                {"api_count": 0},
+                {"rest_api_count": 0, "http_api_route_count": 0},
             )
 
         unauthenticated_methods = 0
@@ -1023,11 +1134,13 @@ def get_domain() -> DomainModule:
                         unauthenticated_methods += 1
 
         evidence = {
-            "api_count": collection_count(apis),
+            "rest_api_count": collection_count(apis),
             "method_count": method_count,
             "unauthenticated_method_count": unauthenticated_methods,
+            "http_api_route_count": http_route_count,
+            "http_unauthenticated_route_count": http_unauthenticated_routes,
         }
-        if unauthenticated_methods > 0:
+        if unauthenticated_methods > 0 or http_unauthenticated_routes > 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -1035,7 +1148,7 @@ def get_domain() -> DomainModule:
                 "WRK-24",
                 "FAIL",
                 evidence,
-                "Unauthenticated API Gateway methods found",
+                "Unauthenticated API Gateway REST or HTTP API routes found",
             )
         return ctx.results.audit_result(
             account_id,
@@ -1044,14 +1157,89 @@ def get_domain() -> DomainModule:
             "WRK-24",
             "PASS",
             evidence,
-            "No API methods with authorizationType NONE found",
+            "No API methods or HTTP routes with authorizationType NONE found",
         )
 
     checks["WRK-24"] = wrk24
 
-    checks["WRK-25"] = workshop(
-        "WRK-25", "Verify API Gateway throttling and WAF protection for public APIs."
-    )
+    def wrk25(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
+        api_data = ctx.invoke_aws_cli(["apigateway", "get-rest-apis"])
+        http_api_data = ctx.invoke_aws_cli(["apigatewayv2", "get-apis"])
+        if api_data is None and http_api_data is None:
+            return ctx.results.null_api_partial(account_id, account_name, region, "WRK-25")
+
+        rest_apis_without_throttling = 0
+        rest_stage_count = 0
+        if api_data and has_property(api_data, "items"):
+            for api in cli_array(api_data.get("items")):
+                api_id = str(property_value(api, ["id"]) or "")
+                if not api_id:
+                    continue
+                stages_data = ctx.invoke_aws_cli(["apigateway", "get-stages", "--rest-api-id", api_id])
+                if stages_data is None or not has_property(stages_data, "item"):
+                    continue
+                for stage in cli_array(stages_data.get("item")):
+                    rest_stage_count += 1
+                    throttle = property_value(stage, ["methodSettings", "*", "throttlingRateLimit"])
+                    if throttle is None:
+                        rest_apis_without_throttling += 1
+
+        http_apis_without_throttling = 0
+        http_api_count = 0
+        if http_api_data and has_property(http_api_data, "Items"):
+            for http_api in cli_array(http_api_data.get("Items")):
+                api_id = str(property_value(http_api, ["ApiId"]) or "")
+                if not api_id:
+                    continue
+                http_api_count += 1
+                stage_data = ctx.invoke_aws_cli(["apigatewayv2", "get-stage", "--api-id", api_id, "--stage-name", "$default"])
+                if stage_data is None:
+                    http_apis_without_throttling += 1
+                    continue
+                default_route_settings = property_value(stage_data, ["DefaultRouteSettings"])
+                if not isinstance(default_route_settings, dict):
+                    http_apis_without_throttling += 1
+                    continue
+                rate_limit = property_value(default_route_settings, ["ThrottlingRateLimit"])
+                if rate_limit is None:
+                    http_apis_without_throttling += 1
+
+        if rest_stage_count == 0 and http_api_count == 0:
+            return ctx.results.not_applicable_no_resources(
+                account_id,
+                account_name,
+                region,
+                "WRK-25",
+                {"rest_stage_count": 0, "http_api_count": 0},
+            )
+
+        evidence = {
+            "rest_stage_count": rest_stage_count,
+            "rest_stages_without_throttling": rest_apis_without_throttling,
+            "http_api_count": http_api_count,
+            "http_apis_without_throttling": http_apis_without_throttling,
+        }
+        if rest_apis_without_throttling > 0 or http_apis_without_throttling > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "WRK-25",
+                "FAIL",
+                evidence,
+                "One or more API Gateway stages lack throttling configuration",
+            )
+        return ctx.results.audit_result(
+            account_id,
+            account_name,
+            region,
+            "WRK-25",
+            "PARTIAL",
+            evidence,
+            "API throttling configured; verify WAF protection for public APIs",
+        )
+
+    checks["WRK-25"] = wrk25
 
     def wrk26(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
         list_data = ctx.invoke_aws_cli(["cognito-idp", "list-user-pools", "--max-results", "10"])
@@ -1080,19 +1268,31 @@ def get_domain() -> DomainModule:
                 ["cognito-idp", "describe-user-pool", "--user-pool-id", pool_id]
             )
             mfa_config = "OFF"
+            password_policy: dict[str, Any] = {}
+            advanced_security = "OFF"
             user_pool = property_value(describe_data, ["UserPool"]) if describe_data else None
             mfa_value = str(property_value(user_pool, ["MfaConfiguration"]) or "")
             if mfa_value:
                 mfa_config = mfa_value
+            policies = property_value(user_pool, ["Policies"])
+            if isinstance(policies, dict):
+                password_policy_obj = property_value(policies, ["PasswordPolicy"])
+                if isinstance(password_policy_obj, dict):
+                    password_policy = password_policy_obj
+            addons = property_value(user_pool, ["UserPoolAddOns"])
+            if isinstance(addons, dict):
+                advanced_security = str(property_value(addons, ["AdvancedSecurityMode"]) or "OFF")
 
             pool_evidence.append(
                 {
                     "pool_id": pool_id,
                     "pool_name": str(property_value(pool, ["Name"]) or ""),
                     "mfa_configuration": mfa_config,
+                    "password_policy": password_policy,
+                    "advanced_security_mode": advanced_security,
                 }
             )
-            if mfa_config.lower() == "off":
+            if mfa_config.lower() == "off" or not password_policy:
                 failing_pools += 1
 
         evidence = {
@@ -1121,5 +1321,8 @@ def get_domain() -> DomainModule:
         )
 
     checks["WRK-26"] = wrk26
+
+    if len(checks) != 26:
+        raise RuntimeError(f"WRK domain must define 26 controls, found {len(checks)}")
 
     return DomainModule(code="WRK", severity=SEVERITY, checks=checks)  # type: ignore[arg-type]

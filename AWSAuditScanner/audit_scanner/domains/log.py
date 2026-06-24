@@ -15,25 +15,25 @@ SEVERITY = {
     "LOG-01": "P0",
     "LOG-02": "P0",
     "LOG-03": "P0",
-    "LOG-04": "P1",
-    "LOG-05": "P1",
+    "LOG-04": "P0",
+    "LOG-05": "P0",
     "LOG-06": "P1",
-    "LOG-07": "P1",
-    "LOG-08": "P1",
-    "LOG-09": "P2",
-    "LOG-10": "P1",
-    "LOG-11": "P1",
-    "LOG-12": "P0",
-    "LOG-13": "P1",
+    "LOG-07": "P0",
+    "LOG-08": "P0",
+    "LOG-09": "P0",
+    "LOG-10": "P0",
+    "LOG-11": "P0",
+    "LOG-12": "P1",
+    "LOG-13": "P0",
     "LOG-14": "P0",
-    "LOG-15": "P1",
-    "LOG-16": "P1",
-    "LOG-17": "P1",
-    "LOG-18": "P1",
+    "LOG-15": "P0",
+    "LOG-16": "P0",
+    "LOG-17": "P2",
+    "LOG-18": "P0",
     "LOG-19": "P1",
-    "LOG-20": "P2",
-    "LOG-21": "P1",
-    "LOG-22": "P1",
+    "LOG-20": "P1",
+    "LOG-21": "P0",
+    "LOG-22": "P0",
 }
 
 
@@ -415,30 +415,41 @@ def get_domain() -> DomainModule:
             return ctx.results.null_api_partial(account_id, account_name, region, "LOG-04")
 
         s3_data_resources: list[dict[str, Any]] = []
+        lambda_data_resources: list[dict[str, Any]] = []
         if has_property(selector_data, "EventSelectors"):
             for selector in cli_array(property_value(selector_data, ["EventSelectors"])):
                 if not has_property(selector, "DataResources"):
                     continue
                 for resource in cli_array(property_value(selector, ["DataResources"])):
                     resource_type = _string(property_value(resource, ["Type"]))
-                    if resource_type != "AWS::S3::Object":
-                        continue
                     values = []
                     if has_property(resource, "Values"):
                         values = list(cli_array(property_value(resource, ["Values"])))
-                    s3_data_resources.append({"type": resource_type, "values": list(values)})
+                    if resource_type == "AWS::S3::Object":
+                        s3_data_resources.append({"type": resource_type, "values": list(values)})
+                    if resource_type == "AWS::Lambda::Function":
+                        lambda_data_resources.append({"type": resource_type, "values": list(values)})
 
         evidence = {
             "trail_name": _string(property_value(org_trail, ["Name"])),
             "s3_data_resources": list(s3_data_resources),
+            "lambda_data_resources": list(lambda_data_resources),
+            "s3_data_resources": list(s3_data_resources),
             "s3_data_resource_count": collection_count(s3_data_resources),
+            "lambda_data_resource_count": collection_count(lambda_data_resources),
         }
-        if collection_count(s3_data_resources) > 0:
+        if collection_count(s3_data_resources) > 0 or collection_count(lambda_data_resources) > 0:
             return ctx.results.audit_result(
-                account_id, account_name, region, "LOG-04", "PASS", evidence, "S3 data events configured on CloudTrail"
+                account_id,
+                account_name,
+                region,
+                "LOG-04",
+                "PASS",
+                evidence,
+                "S3 or Lambda data events configured on CloudTrail",
             )
         return ctx.results.audit_result(
-            account_id, account_name, region, "LOG-04", "FAIL", evidence, "No S3 data events configured"
+            account_id, account_name, region, "LOG-04", "FAIL", evidence, "No S3 or Lambda data events configured"
         )
 
     checks["LOG-04"] = log04
@@ -514,7 +525,7 @@ def get_domain() -> DomainModule:
             "LOG-06",
             "FAIL",
             evidence,
-            "Organization CloudTrail KMSKeyId is null (known gap FND-058)",
+            "Organization CloudTrail KMSKeyId is null",
         )
 
     checks["LOG-06"] = log06
@@ -537,13 +548,22 @@ def get_domain() -> DomainModule:
         sse_kms = _test_log_s3_bucket_sse_kms(ctx, bucket_name)
         public_blocked = _test_log_s3_bucket_public_access_blocked(ctx, bucket_name)
         versioning = _test_log_s3_bucket_versioning_enabled(ctx, bucket_name)
+        cloudtrail_write_only = False
+        policy_data = ctx.invoke_aws_cli(["s3api", "get-bucket-policy", "--bucket", bucket_name])
+        if policy_data and has_property(policy_data, "Policy"):
+            policy_text = str(property_value(policy_data, ["Policy"]) or "")
+            if re.search(r"cloudtrail\.amazonaws\.com", policy_text) and not re.search(
+                r'"Principal"\s*:\s*"\*"', policy_text
+            ):
+                cloudtrail_write_only = True
         evidence = {
             "bucket_name": bucket_name,
             "sse_kms": sse_kms,
             "public_blocked": public_blocked,
             "versioning": versioning,
+            "cloudtrail_write_policy": cloudtrail_write_only,
         }
-        if sse_kms and public_blocked and versioning:
+        if sse_kms and public_blocked and versioning and cloudtrail_write_only:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -632,25 +652,36 @@ def get_domain() -> DomainModule:
 
         log_groups = cli_array(property_value(data, ["logGroups"])) if has_property(data, "logGroups") else []
         null_retention_count = 0
+        short_retention_count = 0
         null_retention_names: list[str] = []
+        short_retention_names: list[str] = []
 
         for log_group in log_groups:
             has_retention = False
+            retention_days = 0
             if has_property(log_group, "retentionInDays"):
                 retention = property_value(log_group, ["retentionInDays"])
                 if retention is not None:
                     has_retention = True
+                    retention_days = int(retention)
+            group_name = _string(property_value(log_group, ["logGroupName"]))
             if not has_retention:
                 null_retention_count += 1
                 if collection_count(null_retention_names) < 5:
-                    null_retention_names.append(_string(property_value(log_group, ["logGroupName"])))
+                    null_retention_names.append(group_name)
+            elif retention_days < 90:
+                short_retention_count += 1
+                if collection_count(short_retention_names) < 5:
+                    short_retention_names.append(group_name)
 
         evidence = {
             "log_group_count": collection_count(log_groups),
             "null_retention_count": null_retention_count,
+            "short_retention_count": short_retention_count,
             "null_retention_names": list(null_retention_names),
+            "short_retention_names": list(short_retention_names),
         }
-        if null_retention_count == 0:
+        if null_retention_count == 0 and short_retention_count == 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -659,6 +690,16 @@ def get_domain() -> DomainModule:
                 "PASS",
                 evidence,
                 "All log groups have retention configured",
+            )
+        if short_retention_count > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "LOG-09",
+                "FAIL",
+                evidence,
+                "One or more log groups have retention below 90 days",
             )
         return ctx.results.audit_result(
             account_id, account_name, region, "LOG-09", "FAIL", evidence, "One or more log groups have null retention"
@@ -673,16 +714,36 @@ def get_domain() -> DomainModule:
 
         cloudtrail_groups: list[str] = []
         flow_log_groups: list[str] = []
+        groups_without_kms: list[str] = []
         if has_property(data, "logGroups"):
             for log_group in cli_array(property_value(data, ["logGroups"])):
                 name = _string(property_value(log_group, ["logGroupName"]))
                 lower_name = name.lower()
+                kms_key = _string(property_value(log_group, ["kmsKeyId"]))
                 if re.search(r"cloudtrail|aws-cloudtrail", lower_name):
                     cloudtrail_groups.append(name)
+                    if not kms_key:
+                        groups_without_kms.append(name)
                 if re.search(r"flow|vpc", lower_name):
                     flow_log_groups.append(name)
+                    if not kms_key:
+                        groups_without_kms.append(name)
 
-        evidence = {"cloudtrail_log_groups": list(cloudtrail_groups), "flow_log_groups": list(flow_log_groups)}
+        evidence = {
+            "cloudtrail_log_groups": list(cloudtrail_groups),
+            "flow_log_groups": list(flow_log_groups),
+            "groups_without_kms": list(groups_without_kms[:10]),
+        }
+        if collection_count(groups_without_kms) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "LOG-10",
+                "PARTIAL",
+                evidence,
+                "Critical log groups found but some lack kmsKeyId encryption",
+            )
         if collection_count(cloudtrail_groups) > 0 and collection_count(flow_log_groups) > 0:
             return ctx.results.audit_result(
                 account_id,
@@ -725,8 +786,18 @@ def get_domain() -> DomainModule:
             )
 
         public_read = _test_log_bucket_policy_public_read(ctx, bucket_name)
-        evidence = {"bucket_name": bucket_name, "public_read_allow": public_read}
-        if public_read:
+        delete_allowed = False
+        policy_data = ctx.invoke_aws_cli(["s3api", "get-bucket-policy", "--bucket", bucket_name])
+        if policy_data and has_property(policy_data, "Policy"):
+            policy_text = str(property_value(policy_data, ["Policy"]) or "")
+            if re.search(r"s3:DeleteObject", policy_text, re.IGNORECASE):
+                delete_allowed = True
+        evidence = {
+            "bucket_name": bucket_name,
+            "public_read_allow": public_read,
+            "delete_object_allowed": delete_allowed,
+        }
+        if public_read or delete_allowed:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -734,7 +805,7 @@ def get_domain() -> DomainModule:
                 "LOG-11",
                 "FAIL",
                 evidence,
-                "Public read access allowed on log bucket policy",
+                "Log bucket policy allows public read or object deletion",
             )
         return ctx.results.audit_result(
             account_id,
@@ -1006,7 +1077,7 @@ def get_domain() -> DomainModule:
         if rules_data is None and alarms_data is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "LOG-14")
 
-        iam_patterns = r"CreateUser|DeleteUser|ConsoleLogin|CreateAccessKey|Root|iam\.amazonaws\.com"
+        iam_patterns = r"CreateUser|DeleteUser|DeleteRole|AttachRolePolicy|DeactivateMFADevice|ConsoleLogin|CreateAccessKey|Root|iam\.amazonaws\.com"
         matching_rules: list[str] = []
         matching_alarms: list[str] = []
 
@@ -1063,12 +1134,30 @@ def get_domain() -> DomainModule:
         if assessment is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "LOG-15")
 
+        required_cis_ids = ("CIS-3.5", "CIS-3.8")
+        missing_required: list[str] = []
+        matched_list = list(cli_array(assessment.get("matched_patterns")))
+        for cis_id in required_cis_ids:
+            if cis_id not in matched_list:
+                missing_required.append(cis_id)
+
         evidence = {
             "log_group_name": log_group_name,
             "matched_count": assessment["matched_count"],
             "missing_patterns": list(cli_array(assessment.get("missing_patterns"))),
             "matched_patterns": list(cli_array(assessment.get("matched_patterns"))),
+            "missing_required_patterns": list(missing_required),
         }
+        if collection_count(missing_required) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "LOG-15",
+                "FAIL",
+                evidence,
+                "One or more required CloudTrail protection patterns are missing from metric filters",
+            )
         matched_count = int(assessment.get("matched_count", 0))
         if matched_count >= 10:
             return ctx.results.audit_result(
@@ -1176,63 +1265,48 @@ def get_domain() -> DomainModule:
     checks["LOG-20"] = log20
 
     def log21(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
-        trails = _log_cloud_trails(ctx)
-        if trails is None:
-            return ctx.results.null_api_partial(account_id, account_name, region, "LOG-21")
-
-        log_bucket_name: str | None = None
-        org_trail = _log_organization_trail(trails)
-        if org_trail is not None and has_property(org_trail, "S3BucketName"):
-            candidate = _string(property_value(org_trail, ["S3BucketName"]))
-            log_bucket_name = candidate if candidate else None
-        elif collection_count(trails) > 0:
-            candidate = _string(property_value(trails[0], ["S3BucketName"]))
-            log_bucket_name = candidate if candidate else None
-
-        end_time = datetime.now(timezone.utc).isoformat()
-        start_time = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-        data = ctx.invoke_aws_cli(
-            [
-                "cloudtrail",
-                "lookup-events",
-                "--lookup-attributes",
-                "AttributeKey=EventSource,AttributeValue=s3.amazonaws.com",
-                "--start-time",
-                start_time,
-                "--end-time",
-                end_time,
-                "--max-results",
-                "50",
-            ]
-        )
+        data = ctx.invoke_aws_cli(["events", "list-rules"])
         if data is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "LOG-21")
 
-        matching_events = 0
-        events = cli_array(property_value(data, ["Events"])) if has_property(data, "Events") else []
-        if log_bucket_name:
-            escaped_bucket = re.escape(log_bucket_name)
-            for event in events:
-                event_json = _string(property_value(event, ["CloudTrailEvent"]))
-                if re.search(escaped_bucket, event_json):
-                    matching_events += 1
+        matched_rules: list[str] = []
+        rules_without_targets: list[str] = []
+        if has_property(data, "Rules"):
+            for rule in cli_array(property_value(data, ["Rules"])):
+                if not isinstance(rule, dict):
+                    continue
+                rule_name = str(property_value(rule, ["Name"]) or "")
+                event_pattern = str(property_value(rule, ["EventPattern"]) or "")
+                if not re.search(r"DeleteLogGroup|PutRetentionPolicy", event_pattern):
+                    continue
+                matched_rules.append(rule_name)
+                target_data = ctx.invoke_aws_cli(["events", "list-targets-by-rule", "--rule", rule_name])
+                has_target = False
+                if target_data and has_property(target_data, "Targets"):
+                    for target in cli_array(property_value(target_data, ["Targets"])):
+                        target_arn = str(property_value(target, ["Arn"]) or "")
+                        if re.search(r":sns:|:lambda:|:sqs:", target_arn):
+                            has_target = True
+                            break
+                if not has_target:
+                    rules_without_targets.append(rule_name)
 
         evidence = {
-            "log_bucket_name": log_bucket_name,
-            "s3_event_count": collection_count(events),
-            "log_bucket_event_count": matching_events,
+            "log_deletion_rule_count": collection_count(matched_rules),
+            "matched_rules": list(matched_rules[:10]),
+            "rules_without_targets": list(rules_without_targets[:10]),
         }
-        if matching_events > 0:
+        if collection_count(matched_rules) == 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
                 region,
                 "LOG-21",
-                "PASS",
+                "FAIL",
                 evidence,
-                "S3 access events on log bucket visible in CloudTrail",
+                "No EventBridge rules found for DeleteLogGroup or PutRetentionPolicy",
             )
-        if evidence["s3_event_count"] > 0:
+        if collection_count(rules_without_targets) > 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -1240,22 +1314,22 @@ def get_domain() -> DomainModule:
                 "LOG-21",
                 "PARTIAL",
                 evidence,
-                "CloudTrail active but log bucket access events not captured in sample",
+                "Log deletion rules exist but some have no SNS, Lambda or SQS targets",
             )
         return ctx.results.audit_result(
             account_id,
             account_name,
             region,
             "LOG-21",
-            "FAIL",
+            "PASS",
             evidence,
-            "No S3 events found in CloudTrail lookup sample",
+            "EventBridge rules alert on CloudWatch log group deletion or retention changes",
         )
 
     checks["LOG-21"] = log21
     checks["LOG-22"] = workshop(
         "LOG-22",
-        "Verify log architecture documented in DEX post-bascule Dynatrace 27/05. Check CloudWatch vs Dynatrace split.",
+        "Verify logs are queryable and exportable for external audit: Athena/CloudTrail Lake, S3 export, SIEM integration and retention compliance.",
     )
 
     return DomainModule(code="LOG", severity=SEVERITY, checks=checks)  # type: ignore[arg-type]

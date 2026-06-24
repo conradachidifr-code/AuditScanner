@@ -14,12 +14,15 @@ SEVERITY = {
     "ORG-01": "P0",
     "ORG-02": "P0",
     "ORG-03": "P0",
+    "ORG-04": "P0",
+    "ORG-05": "P1",
     "ORG-06": "P0",
     "ORG-07": "P0",
     "ORG-08": "P1",
     "ORG-09": "P0",
     "ORG-10": "P2",
     "ORG-11": "P2",
+    "ORG-12": "P0",
     "ORG-13": "P0",
     "ORG-14": "P0",
     "ORG-15": "P1",
@@ -28,6 +31,26 @@ SEVERITY = {
     "ORG-18": "P0",
     "ORG-19": "P0",
 }
+
+_ORG_LOG_SCP_PATTERNS = (
+    "StopLogging",
+    "DeleteTrail",
+    "UpdateTrail",
+    "DeleteLogGroup",
+    "PutRetentionPolicy",
+    "PutBucketPolicy",
+    "DeleteBucket",
+)
+_ORG_SEC_SCP_PATTERNS = (
+    "guardduty:DeleteDetector",
+    "guardduty:DisassociateFromMasterAccount",
+    "securityhub:DisableSecurityHub",
+    "securityhub:DeleteInvitations",
+    "config:DeleteConfigurationRecorder",
+    "config:StopConfigurationRecorder",
+    "macie2:DisableMacie",
+    "access-analyzer:DeleteAnalyzer",
+)
 
 
 def _org_global_control_gate(
@@ -193,10 +216,8 @@ def get_domain() -> DomainModule:
                 continue
             content = str(property_value(document, ["Content"]) or "")
             has_deny = re.search(r'"Effect"\s*:\s*"Deny"', content, re.IGNORECASE) is not None
-            covers_guardduty = re.search(r"guardduty:", content, re.IGNORECASE) is not None
-            covers_cloudtrail = re.search(r"cloudtrail:", content, re.IGNORECASE) is not None
-            covers_config = re.search(r"config:", content, re.IGNORECASE) is not None
-            if has_deny and (covers_guardduty or covers_cloudtrail or covers_config):
+            covers_logs = any(re.search(re.escape(pattern), content, re.IGNORECASE) for pattern in _ORG_LOG_SCP_PATTERNS)
+            if has_deny and covers_logs:
                 deny_statement_count += 1
                 if has_property(document, "Name"):
                     matching_policy_names.append(str(property_value(document, ["Name"]) or ""))
@@ -214,7 +235,7 @@ def get_domain() -> DomainModule:
                 "ORG-01",
                 "PASS",
                 evidence,
-                "SCPs exist with Deny statements on GuardDuty, CloudTrail, or Config",
+                "SCPs exist with Deny statements protecting logging services",
             )
         if int(property_value(scp_data, ["UnreadableCount"]) or 0) > 0:
             return ctx.results.audit_result(
@@ -246,12 +267,9 @@ def get_domain() -> DomainModule:
             if not has_property(document, "IsReadable"):
                 continue
             content = str(property_value(document, ["Content"]) or "")
-            if re.search(r"guardduty:DeleteDetector", content, re.IGNORECASE):
-                deny_actions_found.append("guardduty:DeleteDetector")
-            if re.search(r"cloudtrail:DeleteTrail", content, re.IGNORECASE):
-                deny_actions_found.append("cloudtrail:DeleteTrail")
-            if re.search(r"config:DeleteConfigRule", content, re.IGNORECASE):
-                deny_actions_found.append("config:DeleteConfigRule")
+            for pattern in _ORG_SEC_SCP_PATTERNS:
+                if re.search(re.escape(pattern), content, re.IGNORECASE):
+                    deny_actions_found.append(pattern)
         unique_actions: list[str] = []
         for action in deny_actions_found:
             if action not in unique_actions:
@@ -260,10 +278,7 @@ def get_domain() -> DomainModule:
             "deny_actions_found": list(unique_actions),
             "scp_count": int(property_value(scp_data, ["ScpCount"]) or 0),
         }
-        has_guardduty_or_cloudtrail_deny = (
-            "guardduty:DeleteDetector" in unique_actions or "cloudtrail:DeleteTrail" in unique_actions
-        )
-        if has_guardduty_or_cloudtrail_deny:
+        if collection_count(unique_actions) > 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -271,7 +286,7 @@ def get_domain() -> DomainModule:
                 "ORG-02",
                 "PASS",
                 evidence,
-                "At least one SCP denies deletion of GuardDuty or CloudTrail",
+                "At least one SCP denies disabling security services",
             )
         if (
             int(property_value(scp_data, ["UnreadableCount"]) or 0) > 0
@@ -347,6 +362,148 @@ def get_domain() -> DomainModule:
 
     checks["ORG-03"] = org03
 
+    def org04(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
+        gate = _org_global_control_gate(account_id, account_name, region, "ORG-04", ctx)
+        if gate:
+            return gate
+        roots_data = ctx.invoke_aws_cli(["organizations", "list-roots"])
+        if roots_data is None:
+            return ctx.results.null_api_partial(account_id, account_name, region, "ORG-04")
+        roots = cli_array(property_value(roots_data, ["Roots"])) if has_property(roots_data, "Roots") else []
+        ou_names: list[str] = []
+        orphan_accounts: list[dict[str, str]] = []
+        for root in roots:
+            if not isinstance(root, dict) or not has_property(root, "Id"):
+                continue
+            root_id = str(property_value(root, ["Id"]) or "")
+            ou_data = ctx.invoke_aws_cli(
+                ["organizations", "list-organizational-units-for-parent", "--parent-id", root_id]
+            )
+            if ou_data and has_property(ou_data, "OrganizationalUnits"):
+                for ou in cli_array(property_value(ou_data, ["OrganizationalUnits"])):
+                    if isinstance(ou, dict) and has_property(ou, "Name"):
+                        ou_names.append(str(property_value(ou, ["Name"]) or ""))
+            account_data = ctx.invoke_aws_cli(
+                ["organizations", "list-accounts-for-parent", "--parent-id", root_id]
+            )
+            if account_data and has_property(account_data, "Accounts"):
+                for account in cli_array(property_value(account_data, ["Accounts"])):
+                    if not isinstance(account, dict):
+                        continue
+                    orphan_accounts.append(
+                        {
+                            "id": str(property_value(account, ["Id"]) or ""),
+                            "name": str(property_value(account, ["Name"]) or ""),
+                        }
+                    )
+        evidence = {
+            "ou_count": collection_count(ou_names),
+            "ou_names": list(ou_names),
+            "root_orphan_account_count": collection_count(orphan_accounts),
+            "root_orphan_accounts": list(orphan_accounts[:10]),
+        }
+        if collection_count(orphan_accounts) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "ORG-04",
+                "FAIL",
+                evidence,
+                "One or more active accounts are attached directly under the organization root",
+            )
+        if collection_count(ou_names) == 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "ORG-04",
+                "PARTIAL",
+                evidence,
+                "No organizational units found; verify OU segmentation in workshop",
+            )
+        return ctx.results.audit_result(
+            account_id,
+            account_name,
+            region,
+            "ORG-04",
+            "PASS",
+            evidence,
+            "Organizational units exist and no accounts are directly under root",
+        )
+
+    checks["ORG-04"] = org04
+
+    def org05(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
+        gate = _org_global_control_gate(account_id, account_name, region, "ORG-05", ctx)
+        if gate:
+            return gate
+        account_data = ctx.invoke_aws_cli(["organizations", "list-accounts"])
+        if account_data is None:
+            return ctx.results.null_api_partial(account_id, account_name, region, "ORG-05")
+        dedicated_types = {
+            "security": False,
+            "log_archive": False,
+            "network": False,
+            "shared": False,
+        }
+        matched_accounts: list[dict[str, str]] = []
+        if has_property(account_data, "Accounts"):
+            for account in cli_array(property_value(account_data, ["Accounts"])):
+                if not isinstance(account, dict):
+                    continue
+                if str(property_value(account, ["Status"]) or "") != "ACTIVE":
+                    continue
+                account_name_value = str(property_value(account, ["Name"]) or "").lower()
+                account_id_value = str(property_value(account, ["Id"]) or "")
+                if re.search(r"security|sec-", account_name_value):
+                    dedicated_types["security"] = True
+                if re.search(r"log.?archive|logarchive|logs", account_name_value):
+                    dedicated_types["log_archive"] = True
+                if re.search(r"network|net-", account_name_value):
+                    dedicated_types["network"] = True
+                if re.search(r"shared|common|core", account_name_value):
+                    dedicated_types["shared"] = True
+                if collection_count(matched_accounts) < 20:
+                    matched_accounts.append({"id": account_id_value, "name": account_name_value})
+        found_count = sum(1 for present in dedicated_types.values() if present)
+        evidence = {
+            "dedicated_account_types": dedicated_types,
+            "dedicated_type_count": found_count,
+            "active_accounts_sample": list(matched_accounts),
+        }
+        if found_count >= 3:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "ORG-05",
+                "PASS",
+                evidence,
+                "Dedicated security, logging, network or shared accounts detected by naming",
+            )
+        if found_count > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "ORG-05",
+                "PARTIAL",
+                evidence,
+                "Some dedicated account types detected; verify full account separation",
+            )
+        return ctx.results.audit_result(
+            account_id,
+            account_name,
+            region,
+            "ORG-05",
+            "FAIL",
+            evidence,
+            "No dedicated security, log-archive, network or shared accounts detected",
+        )
+
+    checks["ORG-05"] = org05
+
     def org06(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
         return ctx.results.audit_result(
             account_id,
@@ -391,18 +548,34 @@ def get_domain() -> DomainModule:
                     }
                 )
         guard_duty_delegated = collection_count(guard_duty_admin_accounts) > 0
+        security_hub_delegated = False
+        config_delegated = False
+        macie_delegated = False
         if not guard_duty_delegated and collection_count(delegated_admins) > 0:
             for delegated_admin in delegated_admins:
                 for principal in cli_array(property_value(delegated_admin, ["service_principals"])):
-                    principal_text = str(principal or "")
-                    if "guardduty" in principal_text.lower():
+                    principal_text = str(principal or "").lower()
+                    if "guardduty" in principal_text:
                         guard_duty_delegated = True
-                        break
+                    if "securityhub" in principal_text:
+                        security_hub_delegated = True
+                    if "config" in principal_text:
+                        config_delegated = True
+                    if "macie" in principal_text:
+                        macie_delegated = True
         evidence = {
             "guardduty_admin_accounts": list(guard_duty_admin_accounts),
             "delegated_administrators": list(delegated_admins),
+            "security_hub_delegated": security_hub_delegated,
+            "config_delegated": config_delegated,
+            "macie_delegated": macie_delegated,
         }
-        if guard_duty_delegated:
+        delegated_count = sum(
+            1
+            for flag in (guard_duty_delegated, security_hub_delegated, config_delegated, macie_delegated)
+            if flag
+        )
+        if delegated_count >= 2:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -410,10 +583,20 @@ def get_domain() -> DomainModule:
                 "ORG-07",
                 "PASS",
                 evidence,
-                "GuardDuty delegated admin configured",
+                "Delegated administrators configured for multiple security services",
+            )
+        if delegated_count == 1:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "ORG-07",
+                "PARTIAL",
+                evidence,
+                "Only one security service has a delegated administrator",
             )
         return ctx.results.audit_result(
-            account_id, account_name, region, "ORG-07", "FAIL", evidence, "No delegated admin for GuardDuty"
+            account_id, account_name, region, "ORG-07", "FAIL", evidence, "No delegated admin for security services"
         )
 
     checks["ORG-07"] = org07
@@ -453,9 +636,14 @@ def get_domain() -> DomainModule:
             return ctx.results.null_api_partial(account_id, account_name, region, "ORG-10")
         budgets = cli_array(property_value(data, ["Budgets"])) if has_property(data, "Budgets") else []
         budgets_with_alerts: list[dict[str, Any]] = []
+        security_budget_count = 0
         for budget in budgets:
             if not isinstance(budget, dict):
                 continue
+            budget_name = str(property_value(budget, ["BudgetName"]) or "").lower()
+            is_security_budget = bool(
+                re.search(r"guardduty|securityhub|cloudtrail|config|macie|security", budget_name)
+            )
             alert_thresholds: list[str] = []
             if has_property(budget, "NotificationsWithSubscribers"):
                 for notification in cli_array(property_value(budget, ["NotificationsWithSubscribers"])):
@@ -467,18 +655,22 @@ def get_domain() -> DomainModule:
                         if threshold:
                             alert_thresholds.append(str(threshold))
             if collection_count(alert_thresholds) > 0:
+                if is_security_budget:
+                    security_budget_count += 1
                 budgets_with_alerts.append(
                     {
                         "budget_name": str(property_value(budget, ["BudgetName"]) or ""),
                         "alert_thresholds": list(alert_thresholds),
+                        "security_related": is_security_budget,
                     }
                 )
         evidence = {
             "budget_count": collection_count(budgets),
             "budgets_with_alerts": list(budgets_with_alerts),
             "budgets_with_alert_count": collection_count(budgets_with_alerts),
+            "security_budget_with_alert_count": security_budget_count,
         }
-        if collection_count(budgets_with_alerts) > 0:
+        if security_budget_count > 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -486,7 +678,17 @@ def get_domain() -> DomainModule:
                 "ORG-10",
                 "PASS",
                 evidence,
-                "At least one budget with alert configured",
+                "At least one security-related budget with alerts is configured",
+            )
+        if collection_count(budgets_with_alerts) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "ORG-10",
+                "PARTIAL",
+                evidence,
+                "Budget alerts exist but none appear security-service specific",
             )
         return ctx.results.audit_result(
             account_id, account_name, region, "ORG-10", "FAIL", evidence, "No budgets or no alerts"
@@ -506,6 +708,59 @@ def get_domain() -> DomainModule:
         )
 
     checks["ORG-11"] = org11
+
+    def org12(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
+        gate = _org_global_control_gate(account_id, account_name, region, "ORG-12", ctx)
+        if gate:
+            return gate
+        shares_data = ctx.invoke_aws_cli(["ram", "list-resource-shares", "--resource-owner", "SELF"])
+        if shares_data is None:
+            return ctx.results.null_api_partial(account_id, account_name, region, "ORG-12")
+        shares = cli_array(property_value(shares_data, ["resourceShares"])) if has_property(shares_data, "resourceShares") else []
+        principals_data = ctx.invoke_aws_cli(["ram", "list-principals", "--resource-owner", "SELF"])
+        resources_data = ctx.invoke_aws_cli(["ram", "list-resources", "--resource-owner", "SELF"])
+        principal_count = 0
+        resource_count = 0
+        if principals_data and has_property(principals_data, "principals"):
+            principal_count = collection_count(cli_array(property_value(principals_data, ["principals"])))
+        if resources_data and has_property(resources_data, "resources"):
+            resource_count = collection_count(cli_array(property_value(resources_data, ["resources"])))
+        evidence = {
+            "resource_share_count": collection_count(shares),
+            "principal_count": principal_count,
+            "shared_resource_count": resource_count,
+        }
+        if collection_count(shares) > 0 and principal_count > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "ORG-12",
+                "PARTIAL",
+                evidence,
+                "RAM resource shares exist; verify authorized principals and periodic review in workshop",
+            )
+        if collection_count(shares) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "ORG-12",
+                "PARTIAL",
+                evidence,
+                "RAM shares exist but no principals returned",
+            )
+        return ctx.results.audit_result(
+            account_id,
+            account_name,
+            region,
+            "ORG-12",
+            "FAIL",
+            evidence,
+            "No RAM resource shares found",
+        )
+
+    checks["ORG-12"] = org12
     checks["ORG-13"] = (
         lambda account_id, account_name, region, ctx: ctx.results.workshop_control(
             account_id,
@@ -531,19 +786,51 @@ def get_domain() -> DomainModule:
             has_audit_policy = _org_role_attached_policy_match(
                 ctx, role_name, policy_patterns=["ReadOnly", "SecurityAudit"]
             )
+            has_elevated_policy = _org_role_attached_policy_match(
+                ctx, role_name, policy_patterns=["AdministratorAccess", "IAMFullAccess"]
+            )
+            max_session_duration = int(property_value(role, ["MaxSessionDuration"]) or 0)
             if not has_audit_policy:
                 continue
             matching_roles.append(
                 {
                     "role_name": role_name,
                     "role_arn": str(property_value(role, ["Arn"]) or ""),
+                    "max_session_duration": max_session_duration,
+                    "has_elevated_policy": has_elevated_policy,
                 }
             )
+        elevated_roles = [item for item in matching_roles if item.get("has_elevated_policy")]
+        long_session_roles = [
+            item for item in matching_roles if int(item.get("max_session_duration") or 0) > 3600
+        ]
         evidence = {
             "matching_role_count": collection_count(matching_roles),
             "roles": list(matching_roles),
+            "elevated_policy_role_count": collection_count(elevated_roles),
+            "long_session_role_count": collection_count(long_session_roles),
         }
+        if collection_count(elevated_roles) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "ORG-14",
+                "FAIL",
+                evidence,
+                "Audit role has elevated administrator or IAM full access policy attached",
+            )
         if collection_count(matching_roles) > 0:
+            if collection_count(long_session_roles) > 0:
+                return ctx.results.audit_result(
+                    account_id,
+                    account_name,
+                    region,
+                    "ORG-14",
+                    "PARTIAL",
+                    evidence,
+                    "Audit role found but MaxSessionDuration exceeds one hour",
+                )
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -693,5 +980,8 @@ def get_domain() -> DomainModule:
             "Verify SCP documentation exists with owner per SCP and exception process.",
         )
     )
+
+    if len(checks) != 19:
+        raise RuntimeError(f"ORG domain must define 19 controls, found {len(checks)}")
 
     return DomainModule(code="ORG", severity=SEVERITY, checks=checks)  # type: ignore[arg-type]

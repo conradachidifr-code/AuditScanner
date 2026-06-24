@@ -15,6 +15,7 @@ SEVERITY = {
     "CIC-02": "P0",
     "CIC-03": "P0",
     "CIC-04": "P0",
+    "CIC-05": "P0",
     "CIC-06": "P0",
     "CIC-07": "P0",
     "CIC-08": "P1",
@@ -50,6 +51,112 @@ def _test_cic_s3_bucket_encrypted(ctx: CheckContext, bucket_name: str) -> bool:
     if data is None:
         return False
     return property_value(data, ["ServerSideEncryptionConfiguration"]) is not None
+
+
+def _test_cic_s3_bucket_kms_encrypted(ctx: CheckContext, bucket_name: str) -> bool:
+    data = ctx.invoke_aws_cli(["s3api", "get-bucket-encryption", "--bucket", bucket_name])
+    if data is None:
+        return False
+    rules_container = property_value(data, ["ServerSideEncryptionConfiguration"])
+    rules = property_value(rules_container, ["Rules"]) if isinstance(rules_container, dict) else None
+    for rule in cli_array(rules):
+        default = property_value(rule, ["ApplyServerSideEncryptionByDefault"])
+        if not isinstance(default, dict):
+            continue
+        algorithm = str(property_value(default, ["SSEAlgorithm"]) or "")
+        if algorithm.lower() == "aws:kms":
+            return True
+    return False
+
+
+def _get_cic_terraform_state_buckets(bucket_names: list[str]) -> list[str]:
+    return [name for name in bucket_names if re.search(r"terraform|tfstate", name.lower())]
+
+
+def _get_cic_terraform_lock_tables(ctx: CheckContext) -> list[str] | None:
+    data = ctx.invoke_aws_cli(["dynamodb", "list-tables"])
+    if data is None:
+        return None
+    tables: list[str] = []
+    if has_property(data, "TableNames"):
+        for table_name in cli_array(property_value(data, ["TableNames"])):
+            name = str(table_name)
+            if re.search(r"terraform|tfstate|lock", name.lower()):
+                tables.append(name)
+    return tables
+
+
+def _cic_cloudtrail_event_matches(ctx: CheckContext, lookup: list[str], patterns: list[str]) -> dict[str, object]:
+    end_time = datetime.now(timezone.utc).isoformat()
+    start_time = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    data = ctx.invoke_aws_cli(
+        [
+            "cloudtrail",
+            "lookup-events",
+            *lookup,
+            "--start-time",
+            start_time,
+            "--end-time",
+            end_time,
+            "--max-results",
+            "50",
+        ]
+    )
+    if data is None:
+        return {"api_available": False, "event_count": 0, "matching_event_count": 0, "sample_event_names": []}
+
+    matching_names: list[str] = []
+    events = cli_array(property_value(data, ["Events"])) if has_property(data, "Events") else []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event_name = str(property_value(event, ["EventName"]) or "")
+        event_blob = str(property_value(event, ["CloudTrailEvent"]) or "")
+        if any(re.search(pattern, event_blob, re.IGNORECASE) or re.search(pattern, event_name, re.IGNORECASE) for pattern in patterns):
+            if collection_count(matching_names) < 10:
+                matching_names.append(event_name)
+
+    return {
+        "api_available": True,
+        "event_count": collection_count(events),
+        "matching_event_count": collection_count(matching_names),
+        "sample_event_names": list(matching_names),
+    }
+
+
+def _get_cic_pipeline_roles(ctx: CheckContext) -> list[dict[str, str]] | None:
+    data = ctx.invoke_aws_cli(["iam", "list-roles", "--max-items", "1000"])
+    if data is None:
+        return None
+    roles: list[dict[str, str]] = []
+    if has_property(data, "Roles"):
+        for role in cli_array(property_value(data, ["Roles"])):
+            role_name = str(property_value(role, ["RoleName"]) or "")
+            if re.search(r"pipeline|deploy|cicd|terraform", role_name, re.IGNORECASE):
+                roles.append({"role_name": role_name, "arn": str(property_value(role, ["Arn"]) or "")})
+    return roles
+
+
+def _get_cic_pipeline_users_with_active_keys(ctx: CheckContext) -> tuple[list[str], list[str]] | None:
+    user_data = ctx.invoke_aws_cli(["iam", "list-users", "--max-items", "1000"])
+    if user_data is None:
+        return None
+    pipeline_users: list[str] = []
+    users_with_active_keys: list[str] = []
+    if has_property(user_data, "Users"):
+        for user in cli_array(property_value(user_data, ["Users"])):
+            user_name = str(property_value(user, ["UserName"]) or "")
+            if not re.search(r"pipeline|deploy|ci|gitlab", user_name, re.IGNORECASE):
+                continue
+            pipeline_users.append(user_name)
+            key_data = ctx.invoke_aws_cli(["iam", "list-access-keys", "--user-name", user_name])
+            if key_data is None or not has_property(key_data, "AccessKeyMetadata"):
+                continue
+            for key in cli_array(property_value(key_data, ["AccessKeyMetadata"])):
+                if str(property_value(key, ["Status"]) or "") == "Active":
+                    users_with_active_keys.append(user_name)
+                    break
+    return pipeline_users, users_with_active_keys
 
 
 def _test_cic_s3_bucket_public_access_blocked(ctx: CheckContext, bucket_name: str) -> bool:
@@ -155,9 +262,123 @@ def get_domain() -> DomainModule:
     checks["CIC-01"] = workshop(
         "CIC-01", "Verify IaC-only deployment. No untracked console-created resources."
     )
+
+    def cic01(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
+        bucket_names = _get_cic_s3_bucket_names(ctx)
+        if bucket_names is None:
+            return ctx.results.null_api_partial(account_id, account_name, region, "CIC-01")
+
+        state_buckets = _get_cic_terraform_state_buckets(bucket_names)
+        cf_stack_count = _get_cic_cloudformation_stack_count(ctx)
+        evidence = {
+            "terraform_state_bucket_count": collection_count(state_buckets),
+            "terraform_state_buckets": list(state_buckets[:10]),
+            "cloudformation_stack_count": cf_stack_count,
+        }
+        if collection_count(state_buckets) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "CIC-01",
+                "PASS",
+                evidence,
+                "Terraform state buckets found as IaC deployment evidence",
+            )
+        if cf_stack_count is not None and cf_stack_count > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "CIC-01",
+                "PARTIAL",
+                evidence,
+                "CloudFormation stacks found but no Terraform state buckets identified",
+            )
+        return ctx.results.audit_result(
+            account_id,
+            account_name,
+            region,
+            "CIC-01",
+            "PARTIAL",
+            evidence,
+            "No Terraform state buckets or CloudFormation stacks found; verify IaC-only deployment manually",
+        )
+
+    checks["CIC-01"] = cic01
     checks["CIC-02"] = workshop("CIC-02", "Verify IaC repos versioned via GitLab tags/releases.")
     checks["CIC-03"] = workshop("CIC-03", "Verify merge request process with peer review. Check GitLab branch protection.")
     checks["CIC-04"] = workshop("CIC-04", "Verify separate pipeline definitions for prod vs non-prod.")
+
+    def cic05(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
+        gate = ctx.results.global_control_gate(account_id, account_name, region, "CIC-05")
+        if gate:
+            return gate
+        roles = _get_cic_pipeline_roles(ctx)
+        pipeline_user_data = _get_cic_pipeline_users_with_active_keys(ctx)
+        oidc_data = ctx.invoke_aws_cli(["iam", "list-open-id-connect-providers"])
+        if roles is None and pipeline_user_data is None and oidc_data is None:
+            return ctx.results.null_api_partial(account_id, account_name, region, "CIC-05")
+
+        pipeline_users: list[str] = []
+        users_with_active_keys: list[str] = []
+        if pipeline_user_data is not None:
+            pipeline_users, users_with_active_keys = pipeline_user_data
+
+        oidc_providers: list[str] = []
+        if oidc_data and has_property(oidc_data, "OpenIDConnectProviderList"):
+            for provider in cli_array(property_value(oidc_data, ["OpenIDConnectProviderList"])):
+                oidc_providers.append(str(property_value(provider, ["Arn"]) or ""))
+
+        evidence = {
+            "pipeline_role_count": collection_count(roles or []),
+            "pipeline_roles": list(roles or [])[:10],
+            "pipeline_user_count": collection_count(pipeline_users),
+            "pipeline_users_with_active_keys": list(users_with_active_keys),
+            "oidc_provider_count": collection_count(oidc_providers),
+            "oidc_providers": list(oidc_providers),
+        }
+        if collection_count(users_with_active_keys) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "CIC-05",
+                "FAIL",
+                evidence,
+                "Pipeline-related IAM users have active access keys",
+            )
+        if collection_count(roles or []) > 0 and collection_count(oidc_providers) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "CIC-05",
+                "PASS",
+                evidence,
+                "Dedicated pipeline roles and OIDC federation are present without static pipeline user keys",
+            )
+        if collection_count(roles or []) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "CIC-05",
+                "PARTIAL",
+                evidence,
+                "Pipeline roles found but OIDC federation not evidenced",
+            )
+        return ctx.results.audit_result(
+            account_id,
+            account_name,
+            region,
+            "CIC-05",
+            "PARTIAL",
+            evidence,
+            "No dedicated pipeline roles identified; verify STS/OIDC pipeline identities manually",
+        )
+
+    checks["CIC-05"] = cic05
 
     def cic06(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
         ssm_stats = _get_cic_ssm_string_parameter_count(ctx)
@@ -182,9 +403,9 @@ def get_domain() -> DomainModule:
                 account_name,
                 region,
                 "CIC-06",
-                "FAIL",
+                "PARTIAL",
                 evidence,
-                "SSM String parameters or IAM access keys found",
+                "SSM String parameters or IAM access keys found; review whether they store pipeline secrets",
             )
         return ctx.results.audit_result(
             account_id,
@@ -198,17 +419,18 @@ def get_domain() -> DomainModule:
 
     checks["CIC-06"] = cic06
     checks["CIC-07"] = workshop("CIC-07", "Verify Checkov/KICS integrated in GitLab CI pipeline.")
-    checks["CIC-08"] = workshop("CIC-08", "GitLab Ultimate enforcement planned October 2026. Verify current status.")
+    checks["CIC-08"] = workshop(
+        "CIC-08",
+        "Verify security gates block non-compliant IaC deployments. Check policy-as-code enforcement status in pipeline.",
+    )
 
     def cic09(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
         bucket_names = _get_cic_s3_bucket_names(ctx)
         if bucket_names is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "CIC-09")
 
-        state_buckets: list[str] = []
-        for bucket_name in bucket_names:
-            if re.search(r"terraform|tfstate", bucket_name.lower()):
-                state_buckets.append(bucket_name)
+        state_buckets = _get_cic_terraform_state_buckets(bucket_names)
+        lock_tables = _get_cic_terraform_lock_tables(ctx)
 
         if collection_count(state_buckets) == 0:
             return ctx.results.audit_result(
@@ -217,7 +439,7 @@ def get_domain() -> DomainModule:
                 region,
                 "CIC-09",
                 "PARTIAL",
-                {"state_bucket_count": 0},
+                {"state_bucket_count": 0, "lock_table_count": collection_count(lock_tables or [])},
                 "No Terraform state bucket found by naming (may use CloudFormation)",
             )
 
@@ -225,24 +447,28 @@ def get_domain() -> DomainModule:
         all_pass = True
         for bucket_name in state_buckets:
             encrypted = _test_cic_s3_bucket_encrypted(ctx, bucket_name)
+            kms_encrypted = _test_cic_s3_bucket_kms_encrypted(ctx, bucket_name)
             private = _test_cic_s3_bucket_public_access_blocked(ctx, bucket_name)
             versioned = _test_cic_s3_bucket_versioning_enabled(ctx, bucket_name)
             bucket_evidence.append(
                 {
                     "bucket_name": bucket_name,
                     "encrypted": encrypted,
+                    "kms_encrypted": kms_encrypted,
                     "public_blocked": private,
                     "versioning": versioned,
                 }
             )
-            if not (encrypted and private and versioned):
+            if not (kms_encrypted and private and versioned):
                 all_pass = False
 
         evidence = {
             "state_bucket_count": collection_count(state_buckets),
+            "lock_table_count": collection_count(lock_tables or []),
+            "lock_tables": list(lock_tables or []),
             "buckets": list(bucket_evidence),
         }
-        if all_pass:
+        if all_pass and collection_count(lock_tables or []) > 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -250,7 +476,17 @@ def get_domain() -> DomainModule:
                 "CIC-09",
                 "PASS",
                 evidence,
-                "Terraform state bucket encrypted, private, and versioned",
+                "Terraform state buckets use SSE-KMS, are private and versioned with lock tables present",
+            )
+        if all_pass:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "CIC-09",
+                "PARTIAL",
+                evidence,
+                "Terraform state buckets are protected but DynamoDB state lock tables were not found",
             )
         return ctx.results.audit_result(
             account_id,
@@ -265,37 +501,44 @@ def get_domain() -> DomainModule:
     checks["CIC-09"] = cic09
 
     def cic10(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
-        end_time = datetime.now(timezone.utc).isoformat()
-        start_time = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-        data = ctx.invoke_aws_cli(
+        assume_role_events = _cic_cloudtrail_event_matches(
+            ctx,
             [
-                "cloudtrail",
-                "lookup-events",
+                "--lookup-attributes",
+                "AttributeKey=EventName,AttributeValue=AssumeRole",
+            ],
+            [r"terraform", r"deploy", r"pipeline", r"gitlab"],
+        )
+        s3_state_events = _cic_cloudtrail_event_matches(
+            ctx,
+            [
+                "--lookup-attributes",
+                "AttributeKey=EventSource,AttributeValue=s3.amazonaws.com",
+            ],
+            [r"tfstate", r"terraform"],
+        )
+        cf_events = _cic_cloudtrail_event_matches(
+            ctx,
+            [
                 "--lookup-attributes",
                 "AttributeKey=EventSource,AttributeValue=cloudformation.amazonaws.com",
-                "--start-time",
-                start_time,
-                "--end-time",
-                end_time,
-                "--max-results",
-                "50",
-            ]
+            ],
+            [r"cloudformation"],
         )
-        if data is None:
+        if not assume_role_events["api_available"] and not s3_state_events["api_available"]:
             return ctx.results.null_api_partial(account_id, account_name, region, "CIC-10")
 
-        event_count = 0
-        last_event_time = None
-        if has_property(data, "Events"):
-            events = cli_array(property_value(data, ["Events"]))
-            event_count = collection_count(events)
-            if event_count > 0:
-                last_event_time = str(property_value(events[0], ["EventTime"]) or "")
+        matching_count = (
+            int(assume_role_events["matching_event_count"])
+            + int(s3_state_events["matching_event_count"])
+            + int(cf_events["matching_event_count"])
+        )
         evidence = {
-            "cloudformation_event_count_last_30_days": event_count,
-            "last_event_time": last_event_time,
+            "assume_role_events": assume_role_events,
+            "s3_state_events": s3_state_events,
+            "cloudformation_events": cf_events,
         }
-        if event_count > 0:
+        if matching_count > 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -303,16 +546,16 @@ def get_domain() -> DomainModule:
                 "CIC-10",
                 "PASS",
                 evidence,
-                "CloudFormation events visible in CloudTrail",
+                "Deployment activity evidenced in CloudTrail via Terraform, state access, or CloudFormation",
             )
         return ctx.results.audit_result(
             account_id,
             account_name,
             region,
             "CIC-10",
-            "FAIL",
+            "PARTIAL",
             evidence,
-            "No CloudFormation events found in CloudTrail sample",
+            "No deployment events found in CloudTrail sample; verify GitLab/Terraform traceability manually",
         )
 
     checks["CIC-10"] = cic10
@@ -333,8 +576,32 @@ def get_domain() -> DomainModule:
                 if property_value(status, ["recording"]) is True:
                     recorder_active = True
 
-        evidence = {"recorder_active": recorder_active, "recorder_names": recorder_names}
-        if recorder_active:
+        rules_data = ctx.invoke_aws_cli(["configservice", "describe-config-rules"])
+        events_data = ctx.invoke_aws_cli(["events", "list-rules"])
+        config_rules: list[str] = []
+        if rules_data and has_property(rules_data, "ConfigRules"):
+            for rule in cli_array(property_value(rules_data, ["ConfigRules"])):
+                rule_name = str(property_value(rule, ["ConfigRuleName"]) or "")
+                if rule_name:
+                    config_rules.append(rule_name)
+
+        config_event_rules: list[str] = []
+        if events_data and has_property(events_data, "Rules"):
+            for rule in cli_array(property_value(events_data, ["Rules"])):
+                rule_name = str(property_value(rule, ["Name"]) or "")
+                event_pattern = str(property_value(rule, ["EventPattern"]) or "")
+                state = str(property_value(rule, ["State"]) or "")
+                if state == "ENABLED" and re.search(r"config", event_pattern, re.IGNORECASE):
+                    config_event_rules.append(rule_name)
+
+        evidence = {
+            "recorder_active": recorder_active,
+            "recorder_names": recorder_names,
+            "config_rule_count": collection_count(config_rules),
+            "config_rule_names": list(config_rules[:10]),
+            "config_event_rule_names": list(config_event_rules),
+        }
+        if recorder_active and collection_count(config_rules) > 0 and collection_count(config_event_rules) > 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -342,7 +609,17 @@ def get_domain() -> DomainModule:
                 "CIC-12",
                 "PASS",
                 evidence,
-                "AWS Config recorder is active",
+                "AWS Config recorder, rules and config-change alerting are active",
+            )
+        if recorder_active:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "CIC-12",
+                "PARTIAL",
+                evidence,
+                "AWS Config recorder is active but drift alerting or config rules are incomplete",
             )
         return ctx.results.audit_result(
             account_id,
@@ -374,7 +651,7 @@ def get_domain() -> DomainModule:
         if has_property(data, "logGroups"):
             for log_group in cli_array(property_value(data, ["logGroups"])):
                 name = str(property_value(log_group, ["logGroupName"]) or "")
-                if not re.search(r"pipeline|codebuild|codepipeline", name.lower()):
+                if not re.search(r"pipeline|codebuild|codepipeline|gitlab", name.lower()):
                     continue
 
                 retention = None
@@ -401,9 +678,9 @@ def get_domain() -> DomainModule:
                 account_name,
                 region,
                 "CIC-17",
-                "FAIL",
+                "PARTIAL",
                 evidence,
-                "No pipeline-related CloudWatch log groups found",
+                "No pipeline-related CloudWatch log groups identified",
             )
         if collection_count(groups_without_retention) == 0:
             return ctx.results.audit_result(
@@ -429,30 +706,44 @@ def get_domain() -> DomainModule:
     checks["CIC-18"] = workshop("CIC-18", "Verify periodic review and cleanup of unused GitLab pipelines.")
 
     def cic19(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
-        end_time = datetime.now(timezone.utc).isoformat()
-        start_time = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-        data = ctx.invoke_aws_cli(
+        pipeline_events = _cic_cloudtrail_event_matches(
+            ctx,
             [
-                "cloudtrail",
-                "lookup-events",
                 "--lookup-attributes",
                 "AttributeKey=EventSource,AttributeValue=codepipeline.amazonaws.com",
-                "--start-time",
-                start_time,
-                "--end-time",
-                end_time,
-                "--max-results",
-                "50",
-            ]
+            ],
+            [r"codepipeline"],
         )
-        if data is None:
+        terraform_events = _cic_cloudtrail_event_matches(
+            ctx,
+            [
+                "--lookup-attributes",
+                "AttributeKey=EventName,AttributeValue=AssumeRole",
+            ],
+            [r"terraform", r"deploy", r"pipeline", r"gitlab"],
+        )
+        state_events = _cic_cloudtrail_event_matches(
+            ctx,
+            [
+                "--lookup-attributes",
+                "AttributeKey=EventSource,AttributeValue=s3.amazonaws.com",
+            ],
+            [r"tfstate", r"terraform"],
+        )
+        if not pipeline_events["api_available"] and not terraform_events["api_available"]:
             return ctx.results.null_api_partial(account_id, account_name, region, "CIC-19")
 
-        event_count = 0
-        if has_property(data, "Events"):
-            event_count = collection_count(property_value(data, ["Events"]))
-        evidence = {"pipeline_event_count_last_30_days": event_count}
-        if event_count > 0:
+        matching_count = (
+            int(pipeline_events["matching_event_count"])
+            + int(terraform_events["matching_event_count"])
+            + int(state_events["matching_event_count"])
+        )
+        evidence = {
+            "codepipeline_events": pipeline_events,
+            "terraform_assume_role_events": terraform_events,
+            "terraform_state_events": state_events,
+        }
+        if matching_count > 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -460,18 +751,21 @@ def get_domain() -> DomainModule:
                 "CIC-19",
                 "PASS",
                 evidence,
-                "CodePipeline events visible in CloudTrail",
+                "CI/CD activity evidenced in CloudTrail via CodePipeline, Terraform or state access",
             )
         return ctx.results.audit_result(
             account_id,
             account_name,
             region,
             "CIC-19",
-            "FAIL",
+            "PARTIAL",
             evidence,
-            "No CodePipeline events found in CloudTrail sample",
+            "No CI/CD events found in CloudTrail sample; verify GitLab pipeline auditability manually",
         )
 
     checks["CIC-19"] = cic19
+
+    if len(checks) != 19:
+        raise RuntimeError(f"get_domain expected 19 CIC controls but defined {len(checks)}")
 
     return DomainModule(code="CIC", severity=SEVERITY, checks=checks)  # type: ignore[arg-type]

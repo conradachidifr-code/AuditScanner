@@ -252,10 +252,28 @@ def _iam_cross_account_role(account_id: str, trust_policy_text: str) -> bool:
     return False
 
 
-def _iam_trust_policy_has_external_id(trust_policy_text: str) -> bool:
+def _iam_trust_policy_has_cross_account_restriction(trust_policy_text: str) -> bool:
     if not trust_policy_text or not trust_policy_text.strip():
         return False
-    return bool(re.search(r"ExternalId|sts:ExternalId", trust_policy_text))
+    return bool(
+        re.search(r"ExternalId|sts:ExternalId|aws:SourceAccount|aws:SourceArn", trust_policy_text)
+    )
+
+
+def _iam_role_has_wildcard_inline_policy(ctx: CheckContext, role_name: str) -> bool:
+    data = ctx.invoke_aws_cli(["iam", "list-role-policies", "--role-name", role_name])
+    if data is None or not has_property(data, "PolicyNames"):
+        return False
+    for policy_name in cli_array(property_value(data, ["PolicyNames"])):
+        policy_data = ctx.invoke_aws_cli(
+            ["iam", "get-role-policy", "--role-name", role_name, "--policy-name", str(policy_name)]
+        )
+        if policy_data is None:
+            continue
+        document = str(property_value(policy_data, ["PolicyDocument"]) or "")
+        if re.search(r'"Action"\s*:\s*"\*"|"Resource"\s*:\s*"\*"', document):
+            return True
+    return False
 
 
 def _iam_sso_instances(ctx: CheckContext) -> list[dict[str, Any]] | None:
@@ -570,53 +588,37 @@ def get_domain() -> DomainModule:
         gate = _iam_global_control_gate(account_id, account_name, region, "IAM-01", ctx)
         if gate:
             return gate
-        summary = _iam_account_summary_map(ctx)
-        if summary is None:
-            return ctx.results.null_api_partial(account_id, account_name, region, "IAM-01")
-        mfa_enabled = None
-        if has_property(summary, "AccountMFAEnabled"):
-            value = property_value(summary, ["AccountMFAEnabled"])
-            mfa_enabled = int(value) if value is not None else None
         root_usage = _iam_root_credential_usage(ctx)
-        evidence: dict[str, Any] = {"AccountMFAEnabled": mfa_enabled}
-        if root_usage:
-            evidence["root_credential_usage"] = root_usage
-            recent_use_values = [
-                str(root_usage.get("password_last_used") or ""),
-                str(root_usage.get("access_key_1_last_used_date") or ""),
-                str(root_usage.get("access_key_2_last_used_date") or ""),
-            ]
-            operational_use = any(
-                value not in ("", "N/A", "no_information", "not_supported")
-                for value in recent_use_values
-            )
-            if operational_use:
-                return ctx.results.audit_result(
-                    account_id,
-                    account_name,
-                    region,
-                    "IAM-01",
-                    "FAIL",
-                    evidence,
-                    "Root account shows recent operational usage in credential report",
-                )
+        if root_usage is None:
+            return ctx.results.null_api_partial(account_id, account_name, region, "IAM-01")
+        evidence: dict[str, Any] = {"root_credential_usage": root_usage}
+        recent_use_values = [
+            str(root_usage.get("password_last_used") or ""),
+            str(root_usage.get("access_key_1_last_used_date") or ""),
+            str(root_usage.get("access_key_2_last_used_date") or ""),
+        ]
+        operational_use = any(
+            value not in ("", "N/A", "no_information", "not_supported")
+            for value in recent_use_values
+        )
+        if operational_use:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
                 region,
                 "IAM-01",
-                "PASS",
+                "FAIL",
                 evidence,
-                "Root credential report shows no recent operational usage",
+                "Root account shows recent operational usage in credential report",
             )
         return ctx.results.audit_result(
             account_id,
             account_name,
             region,
             "IAM-01",
-            "PARTIAL",
+            "PASS",
             evidence,
-            "Root MFA status collected; credential report unavailable for last-used dates",
+            "Root credential report shows no recent operational usage",
         )
 
     checks["IAM-01"] = iam01
@@ -915,17 +917,7 @@ def get_domain() -> DomainModule:
             "iam_user_count": collection_count(users),
             "active_access_key_count": active_key_count,
         }
-        if active_key_count > 5 and not identity_center_active:
-            return ctx.results.audit_result(
-                account_id,
-                account_name,
-                region,
-                "IAM-09",
-                "FAIL",
-                evidence,
-                "Many static access keys found without Identity Center",
-            )
-        if identity_center_active and active_key_count <= 5:
+        if identity_center_active and active_key_count == 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -933,9 +925,9 @@ def get_domain() -> DomainModule:
                 "IAM-09",
                 "PASS",
                 evidence,
-                "Identity Center active with minimal static access keys",
+                "Identity Center active with no static access keys",
             )
-        if active_key_count > 5:
+        if active_key_count > 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -943,16 +935,16 @@ def get_domain() -> DomainModule:
                 "IAM-09",
                 "FAIL",
                 evidence,
-                "Many users with static access keys for human access",
+                "Static IAM access keys exist for human or long-lived access",
             )
         return ctx.results.audit_result(
             account_id,
             account_name,
             region,
             "IAM-09",
-            "PASS",
+            "PARTIAL",
             evidence,
-            "Human access appears STS-based with limited static keys",
+            "No static access keys but Identity Center not detected",
         )
 
     checks["IAM-09"] = iam09
@@ -997,6 +989,7 @@ def get_domain() -> DomainModule:
         if roles is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "IAM-11")
         admin_roles: list[str] = []
+        wildcard_inline_roles: list[str] = []
         admin_role_count = 0
         for role in roles:
             role_name = str(property_value(role, ["RoleName"]) or "")
@@ -1005,11 +998,26 @@ def get_domain() -> DomainModule:
                 admin_role_count += 1
                 if collection_count(admin_roles) < 10:
                     admin_roles.append(role_name)
+            if re.search(r"Deploy|Pipeline|CICD|Script", role_name, re.IGNORECASE):
+                if _iam_role_has_wildcard_inline_policy(ctx, role_name):
+                    if collection_count(wildcard_inline_roles) < 10:
+                        wildcard_inline_roles.append(role_name)
         evidence = {
             "role_count": collection_count(roles),
             "administrator_role_count": admin_role_count,
             "administrator_roles": list(admin_roles),
+            "wildcard_inline_roles": list(wildcard_inline_roles),
         }
+        if collection_count(wildcard_inline_roles) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "IAM-11",
+                "FAIL",
+                evidence,
+                "Pipeline or deployment roles have inline policies with Action:* or Resource:*",
+            )
         if admin_role_count > 0:
             return ctx.results.audit_result(
                 account_id,
@@ -1167,7 +1175,7 @@ def get_domain() -> DomainModule:
             if not _iam_cross_account_role(account_id, trust_text):
                 continue
             cross_account_count += 1
-            if _iam_trust_policy_has_external_id(trust_text):
+            if _iam_trust_policy_has_cross_account_restriction(trust_text):
                 with_external_id_count += 1
             elif collection_count(missing_external_id) < 10:
                 missing_external_id.append(role_name)
@@ -1188,7 +1196,7 @@ def get_domain() -> DomainModule:
                 "IAM-15",
                 "FAIL",
                 evidence,
-                "Cross-account roles without ExternalId condition found",
+                "Cross-account roles without ExternalId, SourceAccount or SourceArn condition found",
             )
         return ctx.results.audit_result(
             account_id,
@@ -1197,7 +1205,7 @@ def get_domain() -> DomainModule:
             "IAM-15",
             "PASS",
             evidence,
-            "All cross-account roles have ExternalId condition",
+            "All cross-account roles have ExternalId, SourceAccount or SourceArn condition",
         )
 
     checks["IAM-15"] = iam15
@@ -1355,13 +1363,29 @@ def get_domain() -> DomainModule:
         if roles is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "IAM-19")
         pipeline_admin_roles: list[str] = []
+        pipeline_wildcard_roles: list[str] = []
         for role in roles:
             role_name = str(property_value(role, ["RoleName"]) or "")
             if not re.search(r"Deploy|Pipeline|CICD|Script", role_name):
                 continue
             if _iam_role_has_administrator_access(ctx, role_name):
                 pipeline_admin_roles.append(role_name)
-        evidence = {"pipeline_admin_roles": list(pipeline_admin_roles)}
+            if _iam_role_has_wildcard_inline_policy(ctx, role_name):
+                pipeline_wildcard_roles.append(role_name)
+        evidence = {
+            "pipeline_admin_roles": list(pipeline_admin_roles),
+            "pipeline_wildcard_roles": list(pipeline_wildcard_roles),
+        }
+        if collection_count(pipeline_wildcard_roles) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "IAM-19",
+                "FAIL",
+                evidence,
+                "Pipeline roles with wildcard inline policies found",
+            )
         if collection_count(pipeline_admin_roles) > 0:
             return ctx.results.audit_result(
                 account_id,
@@ -1392,13 +1416,40 @@ def get_domain() -> DomainModule:
         if data is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "IAM-20")
         providers: list[str] = []
+        roles_with_oidc_audience = 0
+        roles_missing_oidc_audience = 0
         if has_property(data, "OpenIDConnectProviderList"):
             for provider in cli_array(property_value(data, ["OpenIDConnectProviderList"])):
                 if not isinstance(provider, dict):
                     continue
                 if has_property(provider, "Arn"):
                     providers.append(str(property_value(provider, ["Arn"]) or ""))
-        evidence = {"oidc_provider_arns": list(providers)}
+        roles = _iam_all_roles(ctx)
+        if roles:
+            for role in roles:
+                role_name = str(property_value(role, ["RoleName"]) or "")
+                trust_text = _iam_role_trust_policy_text(ctx, role_name)
+                if not trust_text or "oidc-provider" not in trust_text.lower():
+                    continue
+                if re.search(r"aud|sub|token\.actions\.githubusercontent\.com", trust_text, re.IGNORECASE):
+                    roles_with_oidc_audience += 1
+                else:
+                    roles_missing_oidc_audience += 1
+        evidence = {
+            "oidc_provider_arns": list(providers),
+            "roles_with_oidc_audience": roles_with_oidc_audience,
+            "roles_missing_oidc_audience": roles_missing_oidc_audience,
+        }
+        if collection_count(providers) > 0 and roles_with_oidc_audience > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "IAM-20",
+                "PASS",
+                evidence,
+                "OIDC provider configured with audience or subject conditions on pipeline roles",
+            )
         if collection_count(providers) > 0:
             return ctx.results.audit_result(
                 account_id,
@@ -1424,7 +1475,7 @@ def get_domain() -> DomainModule:
     )
     checks["IAM-23"] = workshop(
         "IAM-23",
-        "Verify time-boxed elevation exists for break-glass access. Check CCOScriptAdmin RFC process.",
+        "Verify time-boxed elevation exists for break-glass access. Check formal RFC and approval process.",
     )
 
     def iam24(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
@@ -1705,24 +1756,14 @@ def get_domain() -> DomainModule:
             if days > 90 and collection_count(long_lifetime_profiles) < 10:
                 long_lifetime_profiles.append(str(property_value(profile, ["Name"]) or ""))
         evidence = {"profile_count": collection_count(profiles), "long_lifetime_profiles": list(long_lifetime_profiles)}
-        if collection_count(long_lifetime_profiles) > 0:
-            return ctx.results.audit_result(
-                account_id,
-                account_name,
-                region,
-                "IAM-32",
-                "FAIL",
-                evidence,
-                "Profile certificate lifetime exceeds 90 days",
-            )
         return ctx.results.audit_result(
             account_id,
             account_name,
             region,
             "IAM-32",
-            "PASS",
+            "PARTIAL",
             evidence,
-            "Profile session durations are within 90 days",
+            "Profile DurationSeconds collected; verify X.509 certificate lifetime separately in workshop",
         )
 
     checks["IAM-32"] = iam32
@@ -1844,18 +1885,36 @@ def get_domain() -> DomainModule:
         profiles = cli_array(property_value(context, ["Profiles"]))
         profiles_with_conditions = 0
         profiles_without_conditions = 0
+        roles_without_conditions = 0
         for profile in profiles:
             if not isinstance(profile, dict):
                 continue
             policy_text = str(property_value(profile, ["SessionPolicy"]) or "")
-            if re.search(r"serialNumber|aws:SourceIp|IpAddress", policy_text):
+            profile_id = str(property_value(profile, ["profileId"]) or "")
+            role_trust_text = ""
+            if profile_id:
+                profile_detail = ctx.invoke_aws_cli(["rolesanywhere", "get-profile", "--profile-id", profile_id])
+                if profile_detail and has_property(profile_detail, "profile"):
+                    prof = property_value(profile_detail, ["profile"])
+                    if isinstance(prof, dict) and has_property(prof, "roleArns"):
+                        for role_arn in cli_array(property_value(prof, ["roleArns"])):
+                            role_arn_text = str(role_arn or "")
+                            if "/role/" in role_arn_text:
+                                role_name = role_arn_text.split("/role/")[-1]
+                                role_trust_text = _iam_role_trust_policy_text(ctx, role_name)
+                                break
+            combined = f"{policy_text} {role_trust_text}"
+            if re.search(r"serialNumber|aws:SourceIp|IpAddress|aws:PrincipalArn", combined):
                 profiles_with_conditions += 1
             else:
                 profiles_without_conditions += 1
+                if role_trust_text and not re.search(r"serialNumber|aws:SourceIp|IpAddress", role_trust_text):
+                    roles_without_conditions += 1
         evidence = {
             "profile_count": collection_count(profiles),
             "profiles_with_conditions": profiles_with_conditions,
             "profiles_without_conditions": profiles_without_conditions,
+            "roles_without_trust_conditions": roles_without_conditions,
         }
         if profiles_without_conditions > 0:
             return ctx.results.audit_result(
@@ -1964,14 +2023,70 @@ def get_domain() -> DomainModule:
         gate = _iam_global_control_gate(account_id, account_name, region, "IAM-41", ctx)
         if gate:
             return gate
+
         credential_report = _get_iam_credential_report(ctx)
-        if credential_report is None:
+        auth_details = ctx.invoke_aws_cli(
+            [
+                "iam",
+                "get-account-authorization-details",
+                "--filter",
+                "LocalManagedPolicy",
+                "ManagedPolicy",
+                "Role",
+                "User",
+                "Group",
+            ]
+        )
+        role_count = 0
+        if auth_details and has_property(auth_details, "RoleDetailList"):
+            role_count = collection_count(cli_array(property_value(auth_details, ["RoleDetailList"])))
+
+        permission_set_count = 0
+        assignment_count = 0
+        instances = _iam_sso_instances(ctx)
+        if instances:
+            for instance in instances:
+                instance_arn = str(property_value(instance, ["InstanceArn"]) or "")
+                if not instance_arn:
+                    continue
+                permission_sets = _iam_permission_set_details(ctx, instance_arn)
+                if permission_sets is None:
+                    continue
+                permission_set_count += collection_count(permission_sets)
+                for permission_set in permission_sets:
+                    ps_arn = str(property_value(permission_set, ["PermissionSetArn"]) or "")
+                    if not ps_arn:
+                        continue
+                    accounts_data = ctx.invoke_aws_cli(
+                        [
+                            "sso-admin",
+                            "list-accounts-for-provisioned-permission-set",
+                            "--instance-arn",
+                            instance_arn,
+                            "--permission-set-arn",
+                            ps_arn,
+                        ]
+                    )
+                    if accounts_data and has_property(accounts_data, "AccountIds"):
+                        assignment_count += collection_count(cli_array(property_value(accounts_data, ["AccountIds"])))
+
+        evidence: dict[str, Any] = {
+            "role_export_count": role_count,
+            "identity_center_permission_set_count": permission_set_count,
+            "permission_set_account_assignments": assignment_count,
+        }
+        if credential_report:
+            evidence["credential_report_state"] = str(credential_report.get("state") or "")
+            evidence["credential_report_generated_time"] = credential_report.get("generated_time")
+
+        if auth_details is None and credential_report is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "IAM-41")
-        state = str(credential_report.get("state") or "")
-        report_data = credential_report.get("report")
-        generated_date = credential_report.get("generated_time")
-        evidence = {"generation_state": state, "generated_time": generated_date}
-        if report_data:
+
+        export_ok = auth_details is not None and role_count >= 0
+        credential_ok = bool(credential_report and credential_report.get("report"))
+        sso_ok = permission_set_count == 0 or assignment_count > 0
+
+        if export_ok and credential_ok and sso_ok:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -1979,15 +2094,27 @@ def get_domain() -> DomainModule:
                 "IAM-41",
                 "PASS",
                 evidence,
-                "Credential report generated successfully",
+                "IAM policy export, credential report and Identity Center assignments are accessible",
             )
-        if state == "TIMEOUT":
-            notes = "Credential report generation did not complete within polling window"
-        elif state == "FAILED":
-            notes = "Credential report generation failed"
-        else:
-            notes = "Cannot generate credential report"
-        return ctx.results.audit_result(account_id, account_name, region, "IAM-41", "FAIL", evidence, notes)
+        if export_ok or credential_ok:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "IAM-41",
+                "PARTIAL",
+                evidence,
+                "Some IAM audit exports succeeded; verify credential report and Identity Center assignments",
+            )
+        return ctx.results.audit_result(
+            account_id,
+            account_name,
+            region,
+            "IAM-41",
+            "FAIL",
+            evidence,
+            "IAM audit exports are not fully accessible",
+        )
 
     checks["IAM-41"] = iam41
     checks["IAM-42"] = workshop(
@@ -2082,13 +2209,28 @@ def get_domain() -> DomainModule:
             identity_store_id_value = property_value(instance_detail, ["IdentityStoreId"])
             if identity_store_id_value is not None:
                 identity_store_id = str(identity_store_id_value)
+        external_ids_found = 0
+        federated_users = 0
+        if identity_store_id:
+            users_data = ctx.invoke_aws_cli(
+                ["identitystore", "list-users", "--identity-store-id", identity_store_id, "--max-results", "50"]
+            )
+            if users_data and has_property(users_data, "Users"):
+                for user in cli_array(property_value(users_data, ["Users"])):
+                    if not isinstance(user, dict):
+                        continue
+                    federated_users += 1
+                    if has_property(user, "ExternalIds") and collection_count(property_value(user, ["ExternalIds"])) > 0:
+                        external_ids_found += 1
         evidence = {
             "instance_arn": instance_arn,
             "identity_store_id": identity_store_id,
             "external_app_count": collection_count(external_apps),
             "external_app_arns": list(external_apps),
+            "identity_store_user_count": federated_users,
+            "users_with_external_ids": external_ids_found,
         }
-        if collection_count(external_apps) > 0:
+        if external_ids_found > 0 or collection_count(external_apps) > 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -2096,7 +2238,7 @@ def get_domain() -> DomainModule:
                 "IAM-44",
                 "PASS",
                 evidence,
-                "External IdP application configured",
+                "External IdP federation detected via applications or identity store external IDs",
             )
         return ctx.results.audit_result(
             account_id,
@@ -2154,6 +2296,9 @@ def get_domain() -> DomainModule:
             return ctx.results.null_api_partial(account_id, account_name, region, "IAM-47")
         sample_names: list[str] = []
         permission_set_count = 0
+        missing_description_count = 0
+        inline_policy_count = 0
+        managed_policy_count = 0
         for instance in instances:
             if not isinstance(instance, dict):
                 continue
@@ -2166,6 +2311,37 @@ def get_domain() -> DomainModule:
             for permission_set in permission_sets:
                 permission_set_count += 1
                 permission_set_name = str(property_value(permission_set, ["Name"]) or "")
+                permission_set_arn = str(property_value(permission_set, ["PermissionSetArn"]) or "")
+                description = str(property_value(permission_set, ["Description"]) or "")
+                if not description.strip():
+                    missing_description_count += 1
+                if permission_set_arn:
+                    inline_data = ctx.invoke_aws_cli(
+                        [
+                            "sso-admin",
+                            "get-inline-policy-for-permission-set",
+                            "--instance-arn",
+                            instance_arn,
+                            "--permission-set-arn",
+                            permission_set_arn,
+                        ]
+                    )
+                    if inline_data and has_property(inline_data, "InlinePolicy"):
+                        inline_policy_count += 1
+                    managed_data = ctx.invoke_aws_cli(
+                        [
+                            "sso-admin",
+                            "list-managed-policies-in-permission-set",
+                            "--instance-arn",
+                            instance_arn,
+                            "--permission-set-arn",
+                            permission_set_arn,
+                        ]
+                    )
+                    if managed_data and has_property(managed_data, "AttachedManagedPolicies"):
+                        managed_policy_count += collection_count(
+                            cli_array(property_value(managed_data, ["AttachedManagedPolicies"]))
+                        )
                 if collection_count(sample_names) < 10 and permission_set_name.strip():
                     sample_names.append(permission_set_name)
         return ctx.results.audit_result(
@@ -2174,7 +2350,13 @@ def get_domain() -> DomainModule:
             region,
             "IAM-47",
             "PARTIAL",
-            {"permission_set_count": permission_set_count, "sample_names": list(sample_names)},
+            {
+                "permission_set_count": permission_set_count,
+                "sample_names": list(sample_names),
+                "missing_description_count": missing_description_count,
+                "permission_sets_with_inline_policy": inline_policy_count,
+                "attached_managed_policy_count": managed_policy_count,
+            },
             "Verify permission set naming convention and governance process exists.",
         )
 
@@ -2188,6 +2370,7 @@ def get_domain() -> DomainModule:
         if instances is None or collection_count(instances) == 0:
             return ctx.results.null_api_partial(account_id, account_name, region, "IAM-48")
         admin_permission_sets: list[str] = []
+        wildcard_inline_permission_sets: list[str] = []
         for instance in instances:
             if not isinstance(instance, dict):
                 continue
@@ -2201,10 +2384,38 @@ def get_domain() -> DomainModule:
                 permission_set_arn = str(property_value(permission_set, ["PermissionSetArn"]) or "")
                 if not permission_set_arn.strip():
                     continue
+                permission_set_name = str(property_value(permission_set, ["Name"]) or "")
+                inline_data = ctx.invoke_aws_cli(
+                    [
+                        "sso-admin",
+                        "get-inline-policy-for-permission-set",
+                        "--instance-arn",
+                        instance_arn,
+                        "--permission-set-arn",
+                        permission_set_arn,
+                    ]
+                )
+                if inline_data and has_property(inline_data, "InlinePolicy"):
+                    inline_policy = str(property_value(inline_data, ["InlinePolicy"]) or "")
+                    if re.search(r'"Action"\s*:\s*"\*"|"Resource"\s*:\s*"\*"', inline_policy):
+                        wildcard_inline_permission_sets.append(permission_set_name)
                 if _iam_permission_set_has_administrator_access(ctx, instance_arn, permission_set_arn):
                     if collection_count(admin_permission_sets) < 10:
-                        admin_permission_sets.append(str(property_value(permission_set, ["Name"]) or ""))
-        evidence = {"administrator_permission_sets": list(admin_permission_sets)}
+                        admin_permission_sets.append(permission_set_name)
+        evidence = {
+            "administrator_permission_sets": list(admin_permission_sets),
+            "wildcard_inline_permission_sets": list(wildcard_inline_permission_sets),
+        }
+        if collection_count(wildcard_inline_permission_sets) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "IAM-48",
+                "FAIL",
+                evidence,
+                "Permission sets with wildcard inline policies found",
+            )
         if collection_count(admin_permission_sets) > 0:
             return ctx.results.audit_result(
                 account_id,
@@ -2350,16 +2561,22 @@ def get_domain() -> DomainModule:
             event_count = collection_count(property_value(data, ["Events"]))
         trail_data = ctx.invoke_aws_cli(["cloudtrail", "describe-trails"])
         multi_region_trails: list[str] = []
+        active_multi_region_trails: list[str] = []
         if trail_data and has_property(trail_data, "trailList"):
             for trail in cli_array(property_value(trail_data, ["trailList"])):
                 if property_value(trail, ["IsMultiRegionTrail"]) is True:
-                    multi_region_trails.append(str(property_value(trail, ["Name"]) or ""))
+                    trail_name = str(property_value(trail, ["Name"]) or "")
+                    multi_region_trails.append(trail_name)
+                    status = ctx.invoke_aws_cli(["cloudtrail", "get-trail-status", "--name", trail_name])
+                    if status and property_value(status, ["IsLogging"]) is True:
+                        active_multi_region_trails.append(trail_name)
         evidence = {
             "sso_event_count_last_7_days": event_count,
             "multi_region_trail_count": collection_count(multi_region_trails),
             "multi_region_trail_names": multi_region_trails[:10],
+            "active_multi_region_trail_count": collection_count(active_multi_region_trails),
         }
-        if event_count > 0 and collection_count(multi_region_trails) > 0:
+        if event_count > 0 and collection_count(active_multi_region_trails) > 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,

@@ -11,9 +11,12 @@ from audit_scanner.helpers import cli_array, collection_count, has_property, pro
 from audit_scanner.results import AuditResult
 
 SEVERITY = {
+    "DAT-01": "P0",
+    "DAT-02": "P0",
     "DAT-03": "P0",
     "DAT-04": "P0",
     "DAT-05": "P0",
+    "DAT-06": "P0",
     "DAT-07": "P1",
     "DAT-08": "P0",
     "DAT-09": "P0",
@@ -23,6 +26,7 @@ SEVERITY = {
     "DAT-13": "P0",
     "DAT-14": "P0",
     "DAT-15": "P0",
+    "DAT-16": "P0",
     "DAT-17": "P0",
     "DAT-18": "P0",
     "DAT-19": "P0",
@@ -119,10 +123,14 @@ def _test_dat_s3_bucket_sse_kms(ctx: CheckContext, region: str, bucket_name: str
 
     # Preserve PowerShell parity: DAT.ps1 checks ".Rules" on a boolean expression,
     # which evaluates as missing and returns false for this control path.
-    if not _test_dat_has_property(True, "Rules"):
+    config = _get_dat_property_value(data, ["ServerSideEncryptionConfiguration"])
+    if not isinstance(config, dict):
+        return False
+    rules = _get_dat_property_value(config, ["Rules"])
+    if not rules:
         return False
 
-    for rule in _get_dat_cli_array(_get_dat_property_value(data, ["ServerSideEncryptionConfiguration", "Rules"])):
+    for rule in _get_dat_cli_array(rules):
         if _test_dat_has_property(rule, "ApplyServerSideEncryptionByDefault"):
             apply_default = _get_dat_property_value(rule, ["ApplyServerSideEncryptionByDefault"])
             algorithm = str(_get_dat_property_value(apply_default, ["SSEAlgorithm"]) or "")
@@ -176,21 +184,68 @@ def get_domain() -> DomainModule:
 
         return _check
 
+    checks["DAT-01"] = workshop(
+        "DAT-01",
+        "Verify a cloud data classification policy exists covering classes, encryption, logging, access, AWS scope and responsibilities.",
+    )
+    checks["DAT-02"] = workshop(
+        "DAT-02",
+        "Verify sensitive data locations are identified and automatic classification scope (Macie) is defined.",
+    )
     checks["DAT-03"] = workshop("DAT-03", "Verify Macie is active for S3 classification. Link to DET-16/17 results.")
 
     def dat04(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
+        rcp_data = ctx.invoke_aws_cli(["organizations", "list-policies", "--filter", "RESOURCE_CONTROL_POLICY"])
+        scp_data = ctx.invoke_aws_cli(["organizations", "list-policies", "--filter", "SERVICE_CONTROL_POLICY"])
+        rcp_names: list[str] = []
+        scp_exfiltration_names: list[str] = []
+        if rcp_data and _test_dat_has_property(rcp_data, "Policies"):
+            for policy in _get_dat_cli_array(rcp_data.get("Policies")):
+                rcp_names.append(str(_get_dat_property_value(policy, ["Name"]) or ""))
+        if scp_data and _test_dat_has_property(scp_data, "Policies"):
+            for policy in _get_dat_cli_array(scp_data.get("Policies")):
+                policy_id = str(_get_dat_property_value(policy, ["Id"]) or "")
+                policy_name = str(_get_dat_property_value(policy, ["Name"]) or "")
+                if not policy_id:
+                    continue
+                detail = ctx.invoke_aws_cli(["organizations", "describe-policy", "--policy-id", policy_id])
+                content = str(
+                    _get_dat_property_value(_get_dat_property_value(detail, ["Policy"]), ["Content"]) or ""
+                )
+                if re.search(r"PrincipalOrgID|s3:ResourceAccount|aws:PrincipalOrgID", content):
+                    scp_exfiltration_names.append(policy_name)
+        evidence = {
+            "rcp_count": _get_dat_collection_count(rcp_names),
+            "rcp_names": list(rcp_names),
+            "scp_exfiltration_count": _get_dat_collection_count(scp_exfiltration_names),
+            "scp_exfiltration_names": list(scp_exfiltration_names),
+        }
+        if _get_dat_collection_count(rcp_names) > 0 or _get_dat_collection_count(scp_exfiltration_names) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "DAT-04",
+                "PARTIAL",
+                evidence,
+                "Organization policies found; verify DLP/exfiltration controls in workshop",
+            )
         return ctx.results.audit_result(
             account_id,
             account_name,
             region,
             "DAT-04",
             "PARTIAL",
-            None,
-            "Check S3 bucket policies and SCP content for data exfiltration blocks. Workshop verification required.",
+            evidence,
+            "No RCP or exfiltration SCP patterns found; workshop verification required",
         )
 
     checks["DAT-04"] = dat04
     checks["DAT-05"] = workshop("DAT-05", "Verify Macie or equivalent DLP detection is active.")
+    checks["DAT-06"] = workshop(
+        "DAT-06",
+        "Verify DLP violation workflow exists: qualification, containment, remediation and communication.",
+    )
     checks["DAT-07"] = workshop(
         "DAT-07", "Verify CloudWatch log patterns do not expose PII. Manual log sampling required."
     )
@@ -327,7 +382,14 @@ def get_domain() -> DomainModule:
         http_listener_count = 0
         https_listener_count = 0
         http_without_redirect_count = 0
+        weak_ssl_policy_count = 0
         failing_listeners: list[dict[str, str]] = []
+        weak_ssl_listeners: list[dict[str, str]] = []
+        weak_ssl_patterns = (
+            "ELBSecurityPolicy-2016-08",
+            "ELBSecurityPolicy-TLS-1-0",
+            "ELBSecurityPolicy-TLS-1-1",
+        )
 
         for load_balancer in load_balancers:
             if not _test_dat_has_property(load_balancer, "LoadBalancerArn"):
@@ -344,6 +406,17 @@ def get_domain() -> DomainModule:
                 protocol = str(listener.get("Protocol", "") or "")
                 if protocol == "HTTPS":
                     https_listener_count += 1
+                    ssl_policy = str(listener.get("SslPolicy", "") or "")
+                    if not ssl_policy or any(pattern in ssl_policy for pattern in weak_ssl_patterns):
+                        weak_ssl_policy_count += 1
+                        if _get_dat_collection_count(weak_ssl_listeners) < 5:
+                            weak_ssl_listeners.append(
+                                {
+                                    "load_balancer": str(load_balancer.get("LoadBalancerName", "")),
+                                    "listener_arn": str(listener.get("ListenerArn", "")),
+                                    "ssl_policy": ssl_policy or "unset",
+                                }
+                            )
                     continue
                 if protocol != "HTTP":
                     continue
@@ -371,7 +444,9 @@ def get_domain() -> DomainModule:
             "http_listener_count": http_listener_count,
             "https_listener_count": https_listener_count,
             "http_without_redirect_count": http_without_redirect_count,
+            "weak_ssl_policy_count": weak_ssl_policy_count,
             "failing_listeners": list(failing_listeners),
+            "weak_ssl_listeners": list(weak_ssl_listeners),
         }
         if http_without_redirect_count > 0:
             return ctx.results.audit_result(
@@ -382,6 +457,16 @@ def get_domain() -> DomainModule:
                 "FAIL",
                 evidence,
                 "One or more HTTP listeners exist without redirect to HTTPS",
+            )
+        if weak_ssl_policy_count > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "DAT-09",
+                "FAIL",
+                evidence,
+                "One or more HTTPS listeners use weak or missing TLS policies",
             )
         return ctx.results.audit_result(
             account_id,
@@ -412,10 +497,28 @@ def get_domain() -> DomainModule:
                 if _get_dat_collection_count(policy_data.get("PolicyNames")) > 0:
                     keys_with_policies += 1
 
+        kms_event_count = 0
+        for event_name in ("DeleteKey", "DisableKey", "ScheduleKeyDeletion"):
+            event_data = _invoke_aws_cli_in_region(
+                ctx,
+                [
+                    "cloudtrail",
+                    "lookup-events",
+                    "--lookup-attributes",
+                    f"AttributeKey=EventName,AttributeValue={event_name}",
+                    "--max-results",
+                    "10",
+                ],
+                region,
+            )
+            if event_data and _test_dat_has_property(event_data, "Events"):
+                kms_event_count += _get_dat_collection_count(event_data.get("Events"))
+
         evidence = {
             "cmk_count": _get_dat_collection_count(customer_keys),
             "keys_with_policies": keys_with_policies,
             "unreadable_policy_count": unreadable_policy_count,
+            "kms_admin_event_count": kms_event_count,
         }
         if unreadable_policy_count > 0:
             return ctx.results.audit_result(
@@ -630,6 +733,70 @@ def get_domain() -> DomainModule:
         )
 
     checks["DAT-15"] = dat15
+
+    def dat16(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
+        bucket_names = _get_dat_s3_bucket_names(ctx, region)
+        if bucket_names is None:
+            return ctx.results.null_api_partial(account_id, account_name, region, "DAT-16")
+
+        buckets_with_policy = 0
+        buckets_without_policy = 0
+        public_policy_buckets: list[str] = []
+        for bucket_name in bucket_names:
+            policy_data = _invoke_aws_cli_in_region(
+                ctx, ["s3api", "get-bucket-policy", "--bucket", bucket_name], region
+            )
+            if policy_data is None:
+                buckets_without_policy += 1
+                continue
+            policy_text = str(_get_dat_property_value(policy_data, ["Policy"]) or "")
+            if not policy_text:
+                buckets_without_policy += 1
+                continue
+            buckets_with_policy += 1
+            if re.search(r'"Principal"\s*:\s*"\*"', policy_text) or re.search(
+                r'"Principal"\s*:\s*\{\s*"AWS"\s*:\s*"\*"\s*\}', policy_text
+            ):
+                if _get_dat_collection_count(public_policy_buckets) < 5:
+                    public_policy_buckets.append(bucket_name)
+
+        evidence = {
+            "bucket_count": _get_dat_collection_count(bucket_names),
+            "buckets_with_policy": buckets_with_policy,
+            "buckets_without_policy": buckets_without_policy,
+            "public_policy_buckets": list(public_policy_buckets),
+        }
+        if _get_dat_collection_count(public_policy_buckets) > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "DAT-16",
+                "FAIL",
+                evidence,
+                "One or more bucket policies allow public principal access",
+            )
+        if buckets_without_policy > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "DAT-16",
+                "PARTIAL",
+                evidence,
+                "Some buckets have no bucket policy; verify least-privilege access in workshop",
+            )
+        return ctx.results.audit_result(
+            account_id,
+            account_name,
+            region,
+            "DAT-16",
+            "PASS",
+            evidence,
+            "All buckets have policies without public principal patterns",
+        )
+
+    checks["DAT-16"] = dat16
 
     def dat17(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
         bucket_names = _get_dat_s3_bucket_names(ctx, region)
@@ -994,12 +1161,15 @@ def get_domain() -> DomainModule:
                 encryption_key_arn = str(value) if value is not None else None
 
             access_policy_present = False
+            delete_recovery_point_denied = False
             if _test_dat_has_property(describe_data, "AccessPolicy"):
                 access_policy_value = str(describe_data.get("AccessPolicy") or "")
                 if access_policy_value:
                     access_policy_present = True
+                    if re.search(r"DeleteRecoveryPoint", access_policy_value, re.IGNORECASE):
+                        delete_recovery_point_denied = True
 
-            vault_ok = bool(encryption_key_arn) and access_policy_present
+            vault_ok = bool(encryption_key_arn) and access_policy_present and delete_recovery_point_denied
             if vault_ok:
                 encrypted_vault_count += 1
             else:
@@ -1011,6 +1181,7 @@ def get_domain() -> DomainModule:
                         "vault_name": vault_name,
                         "encryption_key_arn": encryption_key_arn,
                         "access_policy_set": access_policy_present,
+                        "delete_recovery_point_denied": delete_recovery_point_denied,
                     }
                 )
 
@@ -1028,7 +1199,7 @@ def get_domain() -> DomainModule:
                 "DAT-22",
                 "FAIL",
                 evidence,
-                "One or more backup vaults are not encrypted with a CMK or lack an access policy",
+                "One or more backup vaults lack CMK encryption, access policy, or DeleteRecoveryPoint deny",
             )
         return ctx.results.audit_result(
             account_id,
@@ -1037,7 +1208,7 @@ def get_domain() -> DomainModule:
             "DAT-22",
             "PASS",
             evidence,
-            "Backup vaults are encrypted with CMKs and have access policies",
+            "Backup vaults are encrypted with CMKs and restrict recovery point deletion",
         )
 
     checks["DAT-22"] = dat22
@@ -1079,9 +1250,9 @@ def get_domain() -> DomainModule:
                 account_name,
                 region,
                 "DAT-24",
-                "FAIL",
+                "PARTIAL",
                 evidence,
-                "SSM String parameters exist and may contain secrets in plaintext",
+                "SSM String parameters exist; verify they do not contain secrets during workshop",
             )
         return ctx.results.audit_result(
             account_id,
@@ -1096,15 +1267,24 @@ def get_domain() -> DomainModule:
     checks["DAT-24"] = dat24
 
     def dat25(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
-        secrets_data = _invoke_aws_cli_in_region(
-            ctx, ["secretsmanager", "list-secrets", "--max-results", "100"], region
-        )
-        if secrets_data is None:
-            return ctx.results.null_api_partial(account_id, account_name, region, "DAT-25")
-
         secrets: list[Any] = []
-        if _test_dat_has_property(secrets_data, "SecretList"):
-            secrets = _get_dat_cli_array(secrets_data.get("SecretList"))
+        next_token = None
+        while True:
+            args = ["secretsmanager", "list-secrets", "--max-results", "100"]
+            if next_token:
+                args.extend(["--next-token", next_token])
+            secrets_data = _invoke_aws_cli_in_region(ctx, args, region)
+            if secrets_data is None:
+                return ctx.results.null_api_partial(account_id, account_name, region, "DAT-25")
+            if _test_dat_has_property(secrets_data, "SecretList"):
+                secrets.extend(_get_dat_cli_array(secrets_data.get("SecretList")))
+            next_token = None
+            if _test_dat_has_property(secrets_data, "NextToken"):
+                candidate = str(secrets_data.get("NextToken") or "")
+                if candidate:
+                    next_token = candidate
+            if not next_token:
+                break
 
         if _get_dat_collection_count(secrets) == 0:
             return ctx.results.audit_result(

@@ -25,7 +25,7 @@ SEVERITY = {
     "BCK-12": "P0",
     "BCK-13": "P1",
     "BCK-14": "P1",
-    "BCK-15": "P1",
+    "BCK-15": "P0",
     "BCK-16": "P1",
     "BCK-17": "P1",
     "BCK-18": "P1",
@@ -507,10 +507,133 @@ def _bck_vault_lock_evidence(ctx: CheckContext, vaults: list[dict[str, Any]]) ->
     }
 
 
+def _bck_org_backup_centralization_evidence(ctx: CheckContext) -> dict[str, Any]:
+    delegated_data = ctx.invoke_aws_cli(["organizations", "list-delegated-administrators"])
+    backup_policy_data = ctx.invoke_aws_cli(["organizations", "list-policies", "--filter", "BACKUP_POLICY"])
+
+    backup_delegated_admins: list[str] = []
+    if delegated_data and has_property(delegated_data, "DelegatedAdministrators"):
+        for admin in cli_array(property_value(delegated_data, ["DelegatedAdministrators"])):
+            if not isinstance(admin, dict):
+                continue
+            service_principal = str(property_value(admin, ["ServicePrincipal"]) or "")
+            if "backup" not in service_principal.lower():
+                continue
+            account_id = str(
+                property_value(admin, ["Id"])
+                or property_value(admin, ["AccountId"])
+                or property_value(admin, ["Arn"])
+                or ""
+            )
+            if account_id and collection_count(backup_delegated_admins) < 10:
+                backup_delegated_admins.append(account_id)
+
+    backup_policy_names: list[str] = []
+    if backup_policy_data and has_property(backup_policy_data, "Policies"):
+        for policy in cli_array(property_value(backup_policy_data, ["Policies"])):
+            if not isinstance(policy, dict):
+                continue
+            policy_name = str(property_value(policy, ["Name"]) or "")
+            if policy_name:
+                backup_policy_names.append(policy_name)
+
+    return {
+        "backup_delegated_admin_count": collection_count(backup_delegated_admins),
+        "backup_delegated_admins": list(backup_delegated_admins),
+        "org_backup_policy_count": collection_count(backup_policy_names),
+        "org_backup_policy_names": list(backup_policy_names),
+    }
+
+
+def _bck_vault_policy_access_restricted(policy_text: str) -> bool:
+    if not policy_text.strip():
+        return False
+    if re.search(r'"Principal"\s*:\s*"\*"', policy_text):
+        return False
+    if re.search(r'"AWS"\s*:\s*"\*"', policy_text):
+        return False
+    return bool(re.search(r"backup:", policy_text, re.IGNORECASE))
+
+
+def _bck_scp_delete_recovery_point_evidence(ctx: CheckContext) -> dict[str, Any] | None:
+    policy_data = ctx.invoke_aws_cli(["organizations", "list-policies", "--filter", "SERVICE_CONTROL_POLICY"])
+    if policy_data is None:
+        return None
+
+    matching_policies: list[str] = []
+    if has_property(policy_data, "Policies"):
+        for policy in cli_array(property_value(policy_data, ["Policies"])):
+            if not isinstance(policy, dict):
+                continue
+            policy_id = str(property_value(policy, ["Id"]) or "")
+            policy_name = str(property_value(policy, ["Name"]) or "")
+            if not policy_id:
+                continue
+            detail = ctx.invoke_aws_cli(["organizations", "describe-policy", "--policy-id", policy_id])
+            content = str(property_value(property_value(detail, ["Policy"]), ["Content"]) or "")
+            if re.search(r"DeleteRecoveryPoint", content, re.IGNORECASE) and re.search(
+                r"Deny", content, re.IGNORECASE
+            ):
+                matching_policies.append(policy_name)
+
+    return {
+        "scp_count_with_delete_deny": collection_count(matching_policies),
+        "matching_policy_names": list(matching_policies),
+    }
+
+
+def _bck_backup_alerting_evidence(ctx: CheckContext) -> dict[str, Any]:
+    failed_jobs_data = ctx.invoke_aws_cli(["backup", "list-backup-jobs", "--by-state", "FAILED", "--max-results", "50"])
+    rules_data = ctx.invoke_aws_cli(["events", "list-rules"])
+    alarms_data = ctx.invoke_aws_cli(["cloudwatch", "describe-alarms"])
+
+    failed_jobs: list[dict[str, Any]] = []
+    if failed_jobs_data and has_property(failed_jobs_data, "BackupJobs"):
+        for job in cli_array(property_value(failed_jobs_data, ["BackupJobs"])):
+            if not isinstance(job, dict):
+                continue
+            failed_jobs.append(
+                {
+                    "resource_type": str(property_value(job, ["ResourceType"]) or ""),
+                    "state": str(property_value(job, ["State"]) or ""),
+                    "creation_date": str(property_value(job, ["CreationDate"]) or ""),
+                }
+            )
+
+    matching_rules: list[str] = []
+    if rules_data and has_property(rules_data, "Rules"):
+        for rule in cli_array(property_value(rules_data, ["Rules"])):
+            if not isinstance(rule, dict):
+                continue
+            rule_name = str(property_value(rule, ["Name"]) or "")
+            event_pattern = str(property_value(rule, ["EventPattern"]) or "")
+            if re.search(r"backup|Backup|DeleteRecoveryPoint", event_pattern) or re.search(
+                r"backup|Backup|DeleteRecoveryPoint", rule_name, re.IGNORECASE
+            ):
+                matching_rules.append(rule_name)
+
+    matching_alarms: list[str] = []
+    if alarms_data and has_property(alarms_data, "MetricAlarms"):
+        for alarm in cli_array(property_value(alarms_data, ["MetricAlarms"])):
+            if not isinstance(alarm, dict):
+                continue
+            alarm_name = str(property_value(alarm, ["AlarmName"]) or "")
+            if re.search(r"backup|Backup", alarm_name, re.IGNORECASE):
+                matching_alarms.append(alarm_name)
+
+    return {
+        "recent_failed_job_count": collection_count(failed_jobs),
+        "recent_failed_jobs": list(failed_jobs[:10]),
+        "matching_rule_names": list(matching_rules),
+        "matching_alarm_names": list(matching_alarms),
+    }
+
+
 def _bck_vault_isolation_evidence(ctx: CheckContext, vaults: list[dict[str, Any]], account_id: str) -> dict[str, Any]:
     deletion_evidence = _bck_vault_deletion_evidence(ctx, vaults)
     vault_evidence: list[dict[str, Any]] = []
     cross_account_count = 0
+    restrictive_access_count = 0
 
     for vault in vaults:
         vault_arn = str(property_value(vault, ["BackupVaultArn"]) or "")
@@ -519,12 +642,22 @@ def _bck_vault_isolation_evidence(ctx: CheckContext, vaults: list[dict[str, Any]
         is_cross_account = bool(vault_account and vault_account != account_id)
         if is_cross_account:
             cross_account_count += 1
+
+        policy_data = ctx.invoke_aws_cli(
+            ["backup", "get-backup-vault-access-policy", "--backup-vault-name", vault_name]
+        )
+        policy_text = str(property_value(policy_data, ["Policy"]) or "")
+        access_restricted = _bck_vault_policy_access_restricted(policy_text)
+        if access_restricted:
+            restrictive_access_count += 1
+
         vault_evidence.append(
             {
                 "vault_name": vault_name,
                 "vault_arn": vault_arn,
                 "account_id": vault_account,
                 "cross_account": is_cross_account,
+                "access_policy_restricted": access_restricted,
             }
         )
 
@@ -537,6 +670,7 @@ def _bck_vault_isolation_evidence(ctx: CheckContext, vaults: list[dict[str, Any]
     return {
         "vault_count": collection_count(vaults),
         "cross_account_count": cross_account_count,
+        "restrictive_access_count": restrictive_access_count,
         "restrictive_vault_count": restrictive_vaults,
         "vaults": vault_evidence,
         "access_policies": deletion_evidence.get("vaults", []),
@@ -558,16 +692,26 @@ def get_domain() -> DomainModule:
     )
 
     def bck02(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
+        org_evidence = _bck_org_backup_centralization_evidence(ctx)
         plans = _bck_backup_plans(ctx)
         vaults = _bck_backup_vaults(ctx)
-        if plans is None and vaults is None:
+        if plans is None and vaults is None and org_evidence["backup_delegated_admin_count"] == 0:
             return ctx.results.null_api_partial(account_id, account_name, region, "BCK-02")
 
         plan_count = collection_count(plans or [])
         vault_count = collection_count(vaults or [])
-        evidence = {"plan_count": plan_count, "vault_count": vault_count}
+        evidence = {
+            "organization": org_evidence,
+            "plan_count": plan_count,
+            "vault_count": vault_count,
+        }
 
-        if plan_count > 0 and vault_count > 0:
+        org_centralized = (
+            org_evidence["backup_delegated_admin_count"] > 0 or org_evidence["org_backup_policy_count"] > 0
+        )
+        local_deployed = plan_count > 0 and vault_count > 0
+
+        if org_centralized and local_deployed:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -575,9 +719,9 @@ def get_domain() -> DomainModule:
                 "BCK-02",
                 "PASS",
                 evidence,
-                "AWS Backup plans and vaults are configured for centralized backup governance",
+                "AWS Backup is centrally governed with organization policies and local plans/vaults",
             )
-        if plan_count > 0 or vault_count > 0:
+        if org_centralized or local_deployed:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -585,7 +729,7 @@ def get_domain() -> DomainModule:
                 "BCK-02",
                 "PARTIAL",
                 evidence,
-                "AWS Backup is partially deployed; both plans and vaults should be present",
+                "AWS Backup centralization is partially evidenced (organization and/or local deployment)",
             )
         return ctx.results.audit_result(
             account_id,
@@ -594,7 +738,7 @@ def get_domain() -> DomainModule:
             "BCK-02",
             "FAIL",
             evidence,
-            "No AWS Backup plans or vaults found",
+            "No organization-level AWS Backup governance or local plans/vaults found",
         )
 
     checks["BCK-02"] = bck02
@@ -632,7 +776,11 @@ def get_domain() -> DomainModule:
         has_plan_rds = "RDS" in covered_types or "Aurora" in covered_types or "TAGGED" in covered_types
         has_plan_efs = "EFS" in covered_types or "TAGGED" in covered_types
         has_plan_dynamo = "DynamoDB" in covered_types or "TAGGED" in covered_types
-        plans_cover_all = has_plan_ec2 and has_plan_rds and has_plan_efs and has_plan_dynamo
+        has_plan_fsx = "FSx" in covered_types or "TAGGED" in covered_types
+        fsx_in_scope = int(type_counts.get("FSx", 0) or 0) > 0
+        plans_cover_core = has_plan_ec2 and has_plan_rds and has_plan_efs and has_plan_dynamo
+        plans_cover_fsx = not fsx_in_scope or has_plan_fsx
+        plans_cover_all = plans_cover_core and plans_cover_fsx
 
         efs_ok = efs_evidence["efs_count"] == 0 or efs_evidence["disabled_count"] == 0
         dynamo_ok = dynamodb_evidence["table_count"] == 0 or dynamodb_evidence["disabled_count"] == 0
@@ -641,7 +789,8 @@ def get_domain() -> DomainModule:
             or (
                 ("EC2" in type_counts or "EBS" in type_counts)
                 and ("RDS" in type_counts or "Aurora" in type_counts)
-                and "EFS" in type_counts
+                and ("EFS" in type_counts)
+                and (not fsx_in_scope or "FSx" in type_counts)
             )
         )
 
@@ -861,7 +1010,7 @@ def get_domain() -> DomainModule:
             )
 
         evidence = _bck_vault_isolation_evidence(ctx, vaults, account_id)
-        if evidence["cross_account_count"] > 0:
+        if evidence["cross_account_count"] > 0 and evidence["restrictive_access_count"] == evidence["vault_count"]:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -869,9 +1018,9 @@ def get_domain() -> DomainModule:
                 "BCK-07",
                 "PASS",
                 evidence,
-                "Backup vaults are isolated in a dedicated account",
+                "Backup vaults are isolated with restricted access policies",
             )
-        if evidence["restrictive_vault_count"] == evidence["vault_count"]:
+        if evidence["cross_account_count"] > 0 or evidence["restrictive_access_count"] > 0:
             return ctx.results.audit_result(
                 account_id,
                 account_name,
@@ -879,7 +1028,7 @@ def get_domain() -> DomainModule:
                 "BCK-07",
                 "PARTIAL",
                 evidence,
-                "Vault access is restricted but backups remain in the source account",
+                "Some isolation signals exist but vault access is not fully restricted",
             )
         return ctx.results.audit_result(
             account_id,
@@ -945,15 +1094,46 @@ def get_domain() -> DomainModule:
             )
 
         evidence = _bck_vault_deletion_evidence(ctx, vaults)
-        if evidence["failing_vaults"] == 0:
+        scp_evidence = _bck_scp_delete_recovery_point_evidence(ctx)
+        delete_alert_rules: list[str] = []
+        rules_data = ctx.invoke_aws_cli(["events", "list-rules"])
+        if rules_data and has_property(rules_data, "Rules"):
+            for rule in cli_array(property_value(rules_data, ["Rules"])):
+                if not isinstance(rule, dict):
+                    continue
+                rule_name = str(property_value(rule, ["Name"]) or "")
+                event_pattern = str(property_value(rule, ["EventPattern"]) or "")
+                if re.search(r"DeleteRecoveryPoint", event_pattern, re.IGNORECASE):
+                    delete_alert_rules.append(rule_name)
+
+        combined_evidence = {
+            "vault_policies": evidence,
+            "scp_delete_deny": scp_evidence,
+            "delete_alert_rules": list(delete_alert_rules),
+        }
+        vault_ok = evidence["failing_vaults"] == 0
+        scp_ok = scp_evidence is not None and scp_evidence["scp_count_with_delete_deny"] > 0
+        alert_ok = collection_count(delete_alert_rules) > 0
+
+        if vault_ok and (scp_ok or alert_ok):
             return ctx.results.audit_result(
                 account_id,
                 account_name,
                 region,
                 "BCK-09",
                 "PASS",
-                evidence,
-                "Backup deletion is restricted on all vaults",
+                combined_evidence,
+                "Backup deletion is restricted and SCP or alerting on deletion is present",
+            )
+        if vault_ok:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "BCK-09",
+                "PARTIAL",
+                combined_evidence,
+                "Vault deletion is restricted but SCP/alerting on DeleteRecoveryPoint not evidenced",
             )
         return ctx.results.audit_result(
             account_id,
@@ -961,7 +1141,7 @@ def get_domain() -> DomainModule:
             region,
             "BCK-09",
             "FAIL",
-            evidence,
+            combined_evidence,
             "Missing vault policy or unrestricted backup deletion allowed",
         )
 
@@ -1116,19 +1296,54 @@ def get_domain() -> DomainModule:
     )
     checks["BCK-15"] = workshop(
         "BCK-15",
-        "Verify socle RTO and RPO objectives are defined and validated per component.",
+        "Verify RTO/RPO are formally documented, RSSI-approved, and aligned with platform mechanisms.",
     )
     checks["BCK-16"] = workshop(
         "BCK-16",
-        "Verify failover mechanisms are documented with procedures, responsibilities, prerequisites and tests.",
+        "Verify failover mechanisms are documented and tested. Confirm scope and any derogations are RSSI-approved.",
     )
-    checks["BCK-17"] = workshop(
-        "BCK-17",
-        "Verify backup failures generate handled alerts. Check alerting, escalation and incident follow-up.",
-    )
+
+    def bck17(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
+        evidence = _bck_backup_alerting_evidence(ctx)
+        has_alerting = (
+            collection_count(evidence["matching_rule_names"]) > 0
+            or collection_count(evidence["matching_alarm_names"]) > 0
+        )
+        if has_alerting:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "BCK-17",
+                "PASS",
+                evidence,
+                "Backup failure alerting rules or alarms are configured",
+            )
+        if evidence["recent_failed_job_count"] > 0:
+            return ctx.results.audit_result(
+                account_id,
+                account_name,
+                region,
+                "BCK-17",
+                "FAIL",
+                evidence,
+                "Recent failed backup jobs found without matching alerting rules or alarms",
+            )
+        return ctx.results.audit_result(
+            account_id,
+            account_name,
+            region,
+            "BCK-17",
+            "PARTIAL",
+            evidence,
+            "No backup alerting rules found; verify escalation path and SLA tracking manually",
+        )
+
+    checks["BCK-17"] = bck17
+
     checks["BCK-18"] = workshop(
         "BCK-18",
-        "Verify DR-mode access is controlled and logged. Check dedicated roles, approval, logs and post-usage reviews.",
+        "Verify PRA access roles are dedicated, approved, logged and reviewed post-usage.",
     )
     checks["BCK-19"] = workshop(
         "BCK-19",

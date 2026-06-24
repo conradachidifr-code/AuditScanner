@@ -11,6 +11,7 @@ from audit_scanner.helpers import cli_array, collection_count, has_property, pro
 from audit_scanner.results import AuditResult
 
 SEVERITY = {
+    "GOV-01": "P0",
     "GOV-02": "P0",
     "GOV-03": "P0",
     "GOV-04": "P0",
@@ -19,13 +20,16 @@ SEVERITY = {
     "GOV-07": "P1",
     "GOV-08": "P2",
     "GOV-09": "P0",
+    "GOV-10": "P0",
     "GOV-11": "P0",
     "GOV-12": "P0",
     "GOV-13": "P1",
+    "GOV-14": "P0",
     "GOV-15": "P0",
     "GOV-16": "P1",
     "GOV-17": "P0",
     "GOV-18": "P0",
+    "GOV-19": "P0",
     "GOV-20": "P0",
 }
 
@@ -112,6 +116,10 @@ def get_domain() -> DomainModule:
 
         return _check
 
+    checks["GOV-01"] = workshop(
+        "GOV-01",
+        "Verify a cloud governance framework exists: policies, roles, RACI, change management and compliance scope.",
+    )
     checks["GOV-02"] = workshop(
         "GOV-02", "Verify RACI matrix exists covering AWS/CCoE/Clients per domain. Check DEX/DAT documentation."
     )
@@ -140,34 +148,56 @@ def get_domain() -> DomainModule:
             "GOV-05",
             "PARTIAL",
             {"scp_count": collection_count(scps), "policy_names": list(policy_names)},
-            "Verify derogation process and JIRA FED registry during workshop.",
+            "Verify derogation process and exception registry during workshop.",
         )
 
     checks["GOV-05"] = gov05
 
     def gov06(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
-        data = ctx.invoke_aws_cli(
-            [
-                "cloudtrail",
-                "lookup-events",
-                "--lookup-attributes",
-                "AttributeKey=EventName,AttributeValue=UpdateTrail",
-                "--max-results",
-                "50",
-            ]
-        )
-        if data is None:
-            return ctx.results.null_api_partial(account_id, account_name, region, "GOV-06")
         event_count = 0
-        if has_property(data, "Events"):
-            event_count = collection_count(property_value(data, ["Events"]))
+        for event_name in (
+            "CreateStack",
+            "UpdateStack",
+            "DeleteStack",
+            "CreateChangeSet",
+            "ExecuteChangeSet",
+        ):
+            data = ctx.invoke_aws_cli(
+                [
+                    "cloudtrail",
+                    "lookup-events",
+                    "--lookup-attributes",
+                    f"AttributeKey=EventName,AttributeValue={event_name}",
+                    "--max-results",
+                    "20",
+                ]
+            )
+            if data is None:
+                continue
+            if has_property(data, "Events"):
+                event_count += collection_count(property_value(data, ["Events"]))
+        if event_count == 0:
+            data = ctx.invoke_aws_cli(
+                [
+                    "cloudtrail",
+                    "lookup-events",
+                    "--lookup-attributes",
+                    "AttributeKey=EventName,AttributeValue=UpdateTrail",
+                    "--max-results",
+                    "20",
+                ]
+            )
+            if data is None:
+                return ctx.results.null_api_partial(account_id, account_name, region, "GOV-06")
+            if has_property(data, "Events"):
+                event_count = collection_count(property_value(data, ["Events"]))
         return ctx.results.audit_result(
             account_id,
             account_name,
             region,
             "GOV-06",
             "PARTIAL",
-            {"update_trail_event_count": event_count},
+            {"change_event_count": event_count},
             "RFC/CAB process must be verified during workshop.",
         )
 
@@ -297,6 +327,10 @@ def get_domain() -> DomainModule:
     checks["GOV-09"] = workshop(
         "GOV-09", "Verify risk analysis document exists for AWS socle. Ask for last review date."
     )
+    checks["GOV-10"] = workshop(
+        "GOV-10",
+        "Verify cloud security baseline and hardening standards are documented and communicated.",
+    )
 
     def gov11(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
         gate = ctx.results.global_control_gate(account_id, account_name, region, "GOV-11")
@@ -311,9 +345,18 @@ def get_domain() -> DomainModule:
             )
         targets_evidence: list[dict[str, Any]] = []
         has_root_or_ou_target = False
+        deny_root_scp_count = 0
+        deny_iam_scp_count = 0
         for scp in scps:
             if not has_property(scp, "Id"):
                 continue
+            policy_id = str(property_value(scp, ["Id"]) or "")
+            content = _gov_policy_document_text(ctx, policy_id)
+            if content:
+                if re.search(r"organizations:LeaveOrganization|organizations:DeleteOrganization", content):
+                    deny_root_scp_count += 1
+                if re.search(r"iam:CreateUser|iam:CreateAccessKey|iam:CreateLoginProfile", content):
+                    deny_iam_scp_count += 1
             target_data = ctx.invoke_aws_cli(
                 [
                     "organizations",
@@ -348,7 +391,12 @@ def get_domain() -> DomainModule:
                 region,
                 "GOV-11",
                 "PASS",
-                {"scp_count": collection_count(scps), "targets": list(targets_evidence)},
+                {
+                    "scp_count": collection_count(scps),
+                    "targets": list(targets_evidence),
+                    "deny_root_scp_count": deny_root_scp_count,
+                    "deny_iam_scp_count": deny_iam_scp_count,
+                },
                 "SCPs exist targeting OU root or management",
             )
         return ctx.results.audit_result(
@@ -357,7 +405,12 @@ def get_domain() -> DomainModule:
             region,
             "GOV-11",
             "FAIL",
-            {"scp_count": collection_count(scps), "targets": list(targets_evidence)},
+            {
+                "scp_count": collection_count(scps),
+                "targets": list(targets_evidence),
+                "deny_root_scp_count": deny_root_scp_count,
+                "deny_iam_scp_count": deny_iam_scp_count,
+            },
             "No SCP targets found on OU root or organizational units",
         )
 
@@ -436,12 +489,28 @@ def get_domain() -> DomainModule:
     checks["GOV-13"] = workshop(
         "GOV-13", "Verify RTO/RPO defined per critical component in SIPedia/PCA. Check DIMA objectives."
     )
+    checks["GOV-14"] = workshop(
+        "GOV-14",
+        "Verify cloud service catalog and approved AWS services list exist with ownership and review cadence.",
+    )
     checks["GOV-15"] = workshop(
         "GOV-15", "Verify security KPI dashboard exists (Wiz/Security Hub). Check review cadence."
     )
 
     def gov16(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
-        deprecated_runtimes = ["nodejs12.x", "nodejs10.x", "python2.7", "ruby2.5"]
+        deprecated_runtimes = [
+            "nodejs12.x",
+            "nodejs10.x",
+            "nodejs8.10",
+            "python2.7",
+            "python3.6",
+            "python3.7",
+            "ruby2.5",
+            "ruby2.7",
+            "dotnetcore2.1",
+            "dotnetcore3.1",
+            "java8",
+        ]
         data = ctx.invoke_aws_cli(["lambda", "list-functions", "--max-items", "1000"])
         if data is None:
             return ctx.results.null_api_partial(account_id, account_name, region, "GOV-16")
@@ -497,8 +566,7 @@ def get_domain() -> DomainModule:
                 )
                 if status_data is None:
                     continue
-                # Preserve PowerShell parity: increments on property presence.
-                if has_property(status_data, "IsLogging"):
+                if property_value(status_data, ["IsLogging"]) is True:
                     active_trail_count += 1
         cloudtrail_active = active_trail_count > 0
         recorder_data = ctx.invoke_aws_cli(["configservice", "describe-configuration-recorders"])
@@ -568,6 +636,32 @@ def get_domain() -> DomainModule:
         )
 
     checks["GOV-18"] = gov18
+
+    def gov19(account_id: str, account_name: str, region: str, ctx: CheckContext) -> AuditResult:
+        secrets_data = ctx.invoke_aws_cli(["secretsmanager", "list-secrets", "--max-results", "100"])
+        secrets_count = 0
+        rotation_enabled_count = 0
+        if secrets_data is not None and has_property(secrets_data, "SecretList"):
+            for secret in cli_array(property_value(secrets_data, ["SecretList"])):
+                if not isinstance(secret, dict):
+                    continue
+                secrets_count += 1
+                if property_value(secret, ["RotationEnabled"]) is True:
+                    rotation_enabled_count += 1
+        return ctx.results.audit_result(
+            account_id,
+            account_name,
+            region,
+            "GOV-19",
+            "PARTIAL",
+            {
+                "secrets_count": secrets_count,
+                "rotation_enabled_count": rotation_enabled_count,
+            },
+            "Verify secrets governance policy and rotation coverage during workshop.",
+        )
+
+    checks["GOV-19"] = gov19
     checks["GOV-20"] = workshop(
         "GOV-20", "Verify incident RACI for cloud incidents exists. Check INC domain playbooks."
     )
